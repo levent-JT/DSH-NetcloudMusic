@@ -12,8 +12,20 @@ const TEST_DIR = process.env.TEMP + '/nm-host-test'
 fs.mkdirSync(TEST_DIR, { recursive: true })
 process.env.DSH_PROFILE_DIR = TEST_DIR.replace(/\//g, '\\')
 
-// 登录态从 profile 的插件状态文件读取 —— 不把凭据写进测试脚本
-const REAL_STORE = path.join(process.env.USERPROFILE || process.env.HOME || '', '.dsh', 'profiles', 'desktop', 'netease-music.json')
+// 登录态从插件自己的状态文件读取 —— 不把凭据写进测试脚本。
+//
+// 路径解析必须和 lib/index.js 里的 dataDir() 完全一致：宿主那边
+// DSH_PROFILE_DIR 可能是加载插件之后才设进进程环境的，所以实际落点是
+// DSH_HOME。这里如果写死 profiles/desktop 就会读到一份过期的旧配置
+// （这个坑真踩过：旧文件停在更早的时间，cookie 早已轮换）。
+function resolveDataDir() {
+  return (
+    process.env.DSH_PROFILE_DIR ||
+    process.env.DSH_HOME ||
+    path.join(process.env.USERPROFILE || process.env.HOME || '', '.dsh')
+  )
+}
+const REAL_STORE = path.join(resolveDataDir(), 'netease-music.json')
 const COOKIE_STR = JSON.parse(fs.readFileSync(REAL_STORE, 'utf8')).cookie
 
 fs.writeFileSync(
