@@ -231,11 +231,16 @@ function fakeFetch(url) {
   } else if (u.includes('method=%2Fdiag') || u.includes('method=/diag')) {
     body = { code: 200, ok: true }
   }
+  // 信封：宿主返回 { status, body }，客户端 api() 取 envelope.body。
+  // 直接给 payload 会让 api() 拿到 undefined（这个坑在 heartbeat 测试里踩过一次）。
+  // ★ 只有 /api 是信封 { status, body }；本地 op（/settings、/status）是平的。
+  const isApi = u.indexOf('/api?') >= 0
+  const payload = isApi ? { status: 200, body } : body
   return Promise.resolve({
     ok: true,
     status: 200,
-    json: () => Promise.resolve(body),
-    text: () => Promise.resolve(JSON.stringify(body)),
+    json: () => Promise.resolve(payload),
+    text: () => Promise.resolve(JSON.stringify(payload)),
   })
 }
 
