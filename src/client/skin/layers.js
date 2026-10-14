@@ -44,15 +44,8 @@ const SkinLayers = (() => {
     //   这样"读到自己写的值""磨了整页面"这类事故就不会再从视图代码里长出来。
     // 唯一的接线是下面这行 setBackgroundLayer —— 图层要用 React 渲染，只能由外面建。
 
-    /** 当前歌词行下标：最后一个 t <= 已播秒数 的行。 */
-    function activeLyricIndex(lines, time) {
-      let current = -1;
-      for (let i = 0; i < lines.length; i++) {
-        if (lines[i].t <= time) current = i;
-        else break;
-      }
-      return current;
-    }
+    // activeLyricIndex 已移到 src/client/lyrics.js —— 播放页和这里都要用，
+    // 它不属于"皮肤"这一层，放这里当私有函数会让上层调不到（上一轮就是这么炸的）。
 
     /**
      * 播放页的「主体」装饰——对应官方播放器样式的三大方向（网易云音乐设计团队原文）。

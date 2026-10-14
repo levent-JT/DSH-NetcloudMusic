@@ -3034,7 +3034,7 @@ div[role=presentation]:has(>div[aria-hidden=true]:first-child)>div[aria-hidden=t
       presTimers.push(presTimer);
       [1000, 3000, 8000, 20000, 40000, 90000].forEach((ms) => setTimeout(() => reportDomDiag("t+" + ms + "ms"), ms));
       slots.inject("settings.section", () =>
-        slots.register({ name: "settings.section", id: "netease-music", order: 40, label: () => "网易云音乐" }, guard(SettingsView))
+        slots.register({ name: "settings.section", id: "netease-music-settings", order: 40, label: () => "网易云音乐" }, guard(SettingsView))
       );
 
       return () => {

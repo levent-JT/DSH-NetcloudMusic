@@ -1,4 +1,4 @@
-﻿// 客户端 apply() + 背景图层渲染测试。
+// 客户端 apply() + 背景图层渲染测试。
 //
 // 为什么需要它：原来的 client-smoke.mjs 只验证「factory 能被执行」，从不调用 apply()；
 // 而插件真正的失败点几乎都在 apply() 之后的路径上（注册 slot、挂载背景图层、
@@ -152,6 +152,9 @@ function renderClass(Cmp, props) {
   return inst.render ? inst.render() : null
 }
 
+/** 本次渲染途中造出来的所有元素节点（用来找到 .nm-tab 子页签按钮并点它）。 */
+let seenNodes = []
+
 function walk(node, depth = 0) {
   if (node == null || depth > 40) return
   if (Array.isArray(node)) { node.forEach((n) => walk(n, depth + 1)); return }
@@ -160,6 +163,7 @@ function walk(node, depth = 0) {
   if (node.$$typeof === 'el') {
     rendered++
     hookIndex = 0
+    seenNodes.push(node)
     if (isClassFn(node.type)) { walk(renderClass(node.type, node.props), depth + 1); return }
     if (typeof node.type === 'function') { walk(node.type(node.props || {}), depth + 1); return }
     if (typeof node.type === 'symbol') return
@@ -282,7 +286,10 @@ const ctx = {
       registered.push(def.id)
       // ★ 关键：把注册的组件留下来，最后真的渲染一遍。
       // 之前这里只记 id，等于把「标签本身能不能渲染」这条最重要的路径漏掉了。
-      if (typeof cmp === 'function') registeredCmp.set(def.id, cmp)
+      // 按「挂载点 + id」索引：只按 id 会被同 id 的另一处注册覆盖
+      // （settings.section 与 conversation.view 曾经都叫 netease-music，
+      //  结果测试里拿到的是设置页组件，页签一个都点不出来）。
+      if (typeof cmp === 'function') registeredCmp.set(String(def.name) + '|' + String(def.id), cmp)
       return () => {}
     },
   },
@@ -358,11 +365,53 @@ try {
   }
   if (declaredHooks) note('用到了 ' + declaredHooks + ' 次未 stub 的 React API')
 
+  // ── 逐个点开每个子页签并渲染 ──────────────────────────────────────────
+  // 这一步是这次事故的照妖镜：只在某个视图里用到的符号没定义，
+  // 只渲染默认视图是发现不了的（activeLyricIndex 就是这么漏过去的）。
+  const pageCmp = registeredCmp.get('conversation.view|netease-music')
+  if (pageCmp) {
+    const tabNodes = () => seenNodes.filter((n) => String((n.props && n.props.className) || '').indexOf('nm-tab') >= 0)
+    const viewErrors = []
+    seenNodes = []
+    hookIndex = 0
+    try {
+      walk(React.createElement(pageCmp, {}))
+    } catch (e) {
+      viewErrors.push({ label: '(默认视图)', err: e })
+    }
+    const tabs = tabNodes().length
+    for (let i = 0; i < tabs; i++) {
+      const btn = tabNodes()[i]
+      const label = typeof btn.props.children === 'string' ? btn.props.children : 'tab' + i
+      try {
+        if (typeof btn.props.onClick === 'function') btn.props.onClick()
+        seenNodes = []
+        hookIndex = 0
+        walk(React.createElement(pageCmp, {}))
+      } catch (e) {
+        viewErrors.push({ label, err: e })
+      }
+    }
+    ok(tabs > 0, '子页签按钮可见', tabs + ' 个')
+    ok(
+      viewErrors.length === 0,
+      '每个子页签都能渲染',
+      viewErrors.length ? viewErrors.map((v) => v.label + ': ' + v.err.message).join(' | ') : tabs + ' 个视图全过',
+    )
+    for (const v of viewErrors) {
+      console.log('')
+      console.log('  ── 子页签「' + v.label + '」渲染报错 ──')
+      console.log('     ' + v.err.message)
+      String(v.err.stack || '').split('\n').slice(0, 10).forEach((l) => console.log('     ' + l.trim()))
+    }
+  }
+
   // ── 渲染每个注册的组件（播放器标签、侧栏卡片、设置页）──────────────
   // 这一步才是「标签会不会崩」的直接检验：组件里任何一个引用错名字 /
   // 调用不存在的函数，都会在这里抛出来。
   note('注册的组件: ' + [...registeredCmp.keys()].join(', '))
   for (const [id, cmp] of registeredCmp) {
+    void id;
     let err = null
     const before = rendered
     try {
