@@ -92,6 +92,14 @@
      */
     let lastClientError = null;
     let lastDomDiag = null;
+    /**
+     * 上报环。
+     *
+     * 为什么不能只有一个槽：真正的崩溃往往先到（React 把渲染错误异步重抛给
+     * window.onerror），而我的 DOM 诊断几秒后才发 —— 单槽会被诊断自己盖掉，
+     * 于是"崩溃现场"就这么丢了。保留最近 8 条，先来的不会被后来的顶掉。
+     */
+    const clientErrors = [];
 
     /**
      * 页签容器的存在性时间线。
@@ -228,6 +236,8 @@
           stack: String((err && err.stack) || "").split("\n").slice(0, 12).join(" ⏎ "),
         };
         lastClientError = payload;
+        clientErrors.push(payload);
+        if (clientErrors.length > 8) clientErrors.shift();
         api("/diag", { data: JSON.stringify(payload) }).catch(() => {});
       } catch (e) {
         /* 上报失败不能影响主流程 */
@@ -2176,6 +2186,45 @@
       return panel;
     }
 
+    /**
+     * 插件组件的错误边界。
+     *
+     * 为什么必须有：我们的组件一旦在渲染中抛错，React 会把**整个 root 卸载掉** ——
+     * 表现出来就是「页签一片空白、控制台什么都没有」。而且 React 是异步重抛，
+     * 错误很容易被后续上报盖掉。有了它，出错时至少留下可见提示，错误也进报告环。
+     */
+    class PluginErrorBoundary extends React.Component {
+      constructor(props) {
+        super(props);
+        this.state = { err: null };
+      }
+      static getDerivedStateFromError(err) {
+        return { err };
+      }
+      componentDidCatch(err, info) {
+        reportClientError("view.crash", {
+          message: String((err && err.message) || err),
+          stack: String((err && err.stack) || "").split("\n").slice(0, 12).join(" ⏎ "),
+          componentStack: String((info && info.componentStack) || "").split("\n").slice(0, 12).join(" ⏎ "),
+        });
+      }
+      render() {
+        if (this.state.err) {
+          return el(
+            "div",
+            { className: "nm-crash" },
+            "网易云音乐组件出错了：" + String((this.state.err && this.state.err.message) || this.state.err)
+          );
+        }
+        return this.props.children;
+      }
+    }
+
+    /** 把组件包进错误边界。 */
+    function guard(Cmp) {
+      return () => el(PluginErrorBoundary, {}, el(Cmp, {}));
+    }
+
     /** conversation.view 页签的容器：撑满视图区。 */
     function MusicPage() {
       return el("div", { className: "nm-page-root" }, el(MusicPanel, { mode: "page" }));
@@ -2290,6 +2339,7 @@
               at: new Date().toISOString(),
               // ★ 顺风车：这两个槽是本轮排查的关键，不能让它被这条遥测盖掉
               lastClientError,
+              clientErrors,
               lastDomDiag,
               presTimeline,
               card: box(document.querySelector(".nm-side")),
@@ -2681,6 +2731,7 @@ div[role=presentation]:has(>div[aria-hidden=true]:first-child)>div[aria-hidden=t
 
 /* ── 整页：玻璃卡片浮在背景上 ───────────────────────────────────── */
 .nm-page-root{height:100%;min-height:0;display:flex;flex-direction:column;padding:10px 12px 12px}
+.nm-crash{margin:20px;padding:16px 18px;border-radius:12px;background:rgba(220,60,60,.14);border:1px solid rgba(220,60,60,.45);color:#ffd9d9;font-size:13px;line-height:1.6;word-break:break-all}
 .nm-panel-page{position:relative;top:auto;right:auto;width:100%;max-width:none;height:100%;max-height:none;z-index:auto;
   background:rgba(13,17,23,.45);
   border:1px solid rgba(255,255,255,.12);
@@ -2950,7 +3001,7 @@ div[role=presentation]:has(>div[aria-hidden=true]:first-child)>div[aria-hidden=t
       slots.inject("conversation.view", () =>
         slots.register(
           { name: "conversation.view", id: "netease-music", order: 30, label: () => "网易云音乐" },
-          () => el(MusicPage, {})
+          guard(MusicPage)
         )
       );
       // 侧栏底部小播放器。挂点与 @kenz1117/dsh-ui-usage-billing 的「今日消耗金额」
@@ -2960,7 +3011,7 @@ div[role=presentation]:has(>div[aria-hidden=true]:first-child)>div[aria-hidden=t
       slots.inject("sidebar.footer.action", () =>
         slots.register(
           { name: "sidebar.footer.action", id: "netease-music-player", order: 0 },
-          () => el(SidebarPlayer, {})
+          guard(SidebarPlayer)
         )
       );
       // 桥接：只为从 header 槽的 inject 里捕获 DSH 的 selectView（见 ViewBridge 的注释）。
@@ -2983,7 +3034,7 @@ div[role=presentation]:has(>div[aria-hidden=true]:first-child)>div[aria-hidden=t
       presTimers.push(presTimer);
       [1000, 3000, 8000, 20000, 40000, 90000].forEach((ms) => setTimeout(() => reportDomDiag("t+" + ms + "ms"), ms));
       slots.inject("settings.section", () =>
-        slots.register({ name: "settings.section", id: "netease-music", order: 40, label: () => "网易云音乐" }, () => el(SettingsView, {}))
+        slots.register({ name: "settings.section", id: "netease-music", order: 40, label: () => "网易云音乐" }, guard(SettingsView))
       );
 
       return () => {
