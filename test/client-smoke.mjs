@@ -64,6 +64,19 @@ if (captured) {
     useCallback: (f) => f,
     Fragment: 'Fragment',
     createContext: () => ({ Provider: 'Provider', Consumer: 'Consumer' }),
+    // Component / PureComponent 必须给：错误边界要 extends React.Component，
+    // 而 class extends 是在**模块初始化阶段**求值的 —— 缺了它整个 factory 直接加载失败
+    // （报 "Class extends value undefined is not a constructor"）。
+    Component: class Component {
+      constructor(props) { this.props = props || {}; this.state = {} }
+      setState() {}
+      forceUpdate() {}
+    },
+    PureComponent: class PureComponent {
+      constructor(props) { this.props = props || {}; this.state = {} }
+      setState() {}
+      forceUpdate() {}
+    },
   }
   const ReactDOM = { createPortal: (x) => x }
   const requireStub = (name) => {
@@ -103,16 +116,22 @@ if (captured) {
   // 4) 确认默认音质已改为 lossless
   ok(/quality: "lossless"/.test(code), '默认音质为 lossless')
 
-  // 5) 确认挂载点仍是三处（顶部条 / 浮层 / 设置页）
+  // 5) 确认挂载点（页签 / 侧栏卡片 / 视图桥 / 设置页）
   //    用 slots.inject("...") 计数：register 的选项对象可能换行，正则匹配不稳
+  //
+  //    这里原来断言的是「3 处：顶部条 / 浮层 / 设置页」—— 早就过时了：
+  //    顶部条那处随早期重构被删掉，页签与侧栏卡片后来又加上了，现在是 4 处。
+  //    过时的断言比没有断言更糟：它天天报红，真出问题时反而没人看。
   const slots = [...code.matchAll(/slots\.inject\(\s*"([^"]+)"/g)].map((m) => m[1])
-  ok(slots.length === 3, '注册了 3 个挂载点', slots.join(' | '))
-  ok(
-    slots.includes('conversation.session.header.actions') &&
-      slots.includes('shell.overlay') &&
-      slots.includes('settings.section'),
-    '三处挂载点名称正确（顶部条/浮层/设置页）',
-  )
+  const WANT_SLOTS = [
+    'conversation.view', // 「网易云音乐」页签（整页播放器）
+    'sidebar.footer.action', // 侧栏底部小播放器（与用量卡片同一挂点）
+    'conversation.session.header.actions', // 视图桥：拿到 selectView 才能从别处跳页签
+    'settings.section', // 设置页里的插件设置
+  ]
+  const missing = WANT_SLOTS.filter((s) => !slots.includes(s))
+  ok(missing.length === 0, '四处挂载点齐全', slots.join(' | ') + (missing.length ? '  缺: ' + missing.join(',') : ''))
+  ok(slots.length === WANT_SLOTS.length, '挂载点数量与预期一致（' + WANT_SLOTS.length + ' 处）', '实际 ' + slots.length + ' 处')
 }
 
 console.log(results.join('\n'))
