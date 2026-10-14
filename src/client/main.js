@@ -63,8 +63,7 @@
             ? { tag: top.tagName, cls: String(top.className || "").slice(0, 80), id: top.id || "" }
             : null;
         }
-        reportClientError("dom-diag:" + tag, {
-          message: JSON.stringify({
+        const snap = {
             view: store.view,
             roots: {
               pageRoot: pick(".nm-page-root"),
@@ -74,14 +73,25 @@
               pageBody: pick(".nm-page-body"),
               amb: pick("#nm-ambient"),
             },
-            topMostAtContentCenter: hit,
-            bodyChildren: document.body.childElementCount,
-          }),
-        });
+          topMostAtContentCenter: hit,
+          bodyChildren: document.body.childElementCount,
+        };
+        lastDomDiag = { tag, at: new Date().toISOString(), ...snap };
+        reportClientError("dom-diag:" + tag, { message: JSON.stringify(lastDomDiag) });
       } catch (e) {
         /* 诊断失败不能影响功能 */
       }
     }
+
+    /**
+     * 最近一次错误 / 最近一次 DOM 快照。
+     *
+     * 为什么要留着：宿主 /diag 只保留**最后一次**上报，而侧栏遥测是唯一保证会到达的
+     * 那条（卡片挂载后 2.5s 发）。把这两个槽捎进遥测的 payload，诊断就不会被它盖掉 ——
+     * 上一轮排查就是这么白跑的。
+     */
+    let lastClientError = null;
+    let lastDomDiag = null;
 
     function reportClientError(where, err) {
       try {
@@ -91,6 +101,7 @@
           message: String((err && err.message) || err || "unknown"),
           stack: String((err && err.stack) || "").split("\n").slice(0, 12).join(" ⏎ "),
         };
+        lastClientError = payload;
         api("/diag", { data: JSON.stringify(payload) }).catch(() => {});
       } catch (e) {
         /* 上报失败不能影响主流程 */
@@ -2151,6 +2162,9 @@
             const ccs = container ? getComputedStyle(container) : null;
             const report = {
               at: new Date().toISOString(),
+              // ★ 顺风车：这两个槽是本轮排查的关键，不能让它被这条遥测盖掉
+              lastClientError,
+              lastDomDiag,
               card: box(document.querySelector(".nm-side")),
               wrap: box(wrap),
               cover: box(document.querySelector(".nm-side-cover .nm-cover")),
@@ -2834,7 +2848,7 @@ div[role=presentation]:has(>div[aria-hidden=true]:first-child)>div[aria-hidden=t
       );
       // 排两次：一次同步（刚注册完）、一次延迟 2.5s（等 React 提交完 + 数据拉回来）
       reportDomDiag("sync");
-      setTimeout(() => reportDomDiag("t+2.5s"), 2500);
+      [1000, 3000, 8000].forEach((ms) => setTimeout(() => reportDomDiag("t+" + ms + "ms"), ms));
       slots.inject("settings.section", () =>
         slots.register({ name: "settings.section", id: "netease-music", order: 40, label: () => "网易云音乐" }, () => el(SettingsView, {}))
       );
