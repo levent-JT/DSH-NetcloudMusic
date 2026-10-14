@@ -1,0 +1,31 @@
+MIT License
+
+Copyright (c) 2026 dsh-netease-music (直连模式改造版)
+
+===========================================================================
+本项目的浏览器端 UI（lib/client.js）与二维码编码器（vendor/qr.mjs）
+复用自以下 MIT 许可项目，其版权分别归原作者所有：
+  - lib/client.js  : Copyright (c) JasonCHTT
+                     https://github.com/JasonCHTT/dsh-netease-music
+  - vendor/qr.mjs  : Copyright (c) WolfGenerals
+                     https://github.com/WolfGenerals/ncm-player
+上游许可原文见 vendor/ 目录，完整说明见 THIRD-PARTY-NOTICES.md。
+===========================================================================
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

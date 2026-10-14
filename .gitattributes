@@ -1,0 +1,6 @@
+# 统一按 LF 存进仓库，避免 Windows 上 clone 后出现整文件 diff 噪音。
+# 需要 CRLF 的项目（.bat / .cmd / .ps1）保持原样。
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf

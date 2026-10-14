@@ -1,0 +1,16 @@
+# dsh-netease-music bundle patch：把本插件的 Host 半部插入 host Loader。
+# Client 半部由 package.json 的 dsh.client 声明在 web 平台名册中自动发现。
+#
+# 与上游 JasonCHTT/dsh-netease-music 的关键差异：本插件为「直连模式」——
+# Host 直接调用 music.163.com 的明文 /api/ 端点，因此
+#   * 不再需要 subprocess
+#   * 不再需要 pnpm add NeteaseCloudMusicApi
+#   * 不再需要 port 配置
+# 依赖仅 Node 内置模块 + ctx.webServer。
+#
+# 安装：
+#   pnpm add 'link:<本目录绝对路径>'    （在 profile 目录内执行）
+#   并在 package.json 的 dsh.profile.bundles 末尾追加 "dsh-netease-music"
+- insert:
+    - id: netease-music
+      name: dsh-netease-music
