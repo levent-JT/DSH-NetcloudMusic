@@ -76,7 +76,7 @@
           topMostAtContentCenter: hit,
           bodyChildren: document.body.childElementCount,
         };
-        lastDomDiag = { tag, at: new Date().toISOString(), ...snap };
+        lastDomDiag = { tag, at: new Date().toISOString(), ...snap, dump: dumpDom() };
         reportClientError("dom-diag:" + tag, { message: JSON.stringify(lastDomDiag) });
       } catch (e) {
         /* 诊断失败不能影响功能 */
@@ -101,6 +101,74 @@
      * 从时间线上能直接看出它是从没出现过、还是出现过又消失了。
      */
     const presTimeline = [];
+
+    /**
+     * 穷举式 DOM 倒树。
+     *
+     * 上一轮只查固定选择器，结果是「组件被调用过（子页签点击生效）但
+     * .nm-page-root / .nm-panel / .nm-tabs 全查不到」—— 固定选择器问不出来
+     * "那它到底在哪"，所以这次把文档里所有 nm-* 元素连同它们的祖先链一起倒出来。
+     */
+    function dumpDom() {
+      const out = { nm: [], body: [], views: [] };
+      try {
+        // 1) 文档里所有 nm-* 元素（我们的插件 UI 一定带这个前缀）
+        const all = document.querySelectorAll('[class*="nm-"]');
+        let i = 0;
+        for (const el of all) {
+          if (i++ > 80) break;
+          const r = el.getBoundingClientRect();
+          const cs = getComputedStyle(el);
+          // 祖先链前 4 层，用来判断它挂在谁下面
+          const chain = [];
+          let p = el.parentElement;
+          let d = 0;
+          while (p && d++ < 4) {
+            chain.push((p.tagName || "?").toLowerCase() + "." + String(p.className || "").split(" ")[0]);
+            p = p.parentElement;
+          }
+          out.nm.push({
+            c: String(el.className || "").slice(0, 60),
+            kids: el.childElementCount,
+            w: Math.round(r.width),
+            h: Math.round(r.height),
+            top: Math.round(r.top),
+            disp: cs.display,
+            vis: cs.visibility,
+            op: cs.opacity,
+            chain: chain.join(" < "),
+          });
+        }
+        // 2) body 直接子节点
+        for (const el of document.body.children) {
+          const r = el.getBoundingClientRect();
+          out.body.push({
+            t: (el.tagName || "?").toLowerCase(),
+            id: el.id || "",
+            c: String(el.className || "").slice(0, 40),
+            kids: el.childElementCount,
+            w: Math.round(r.width),
+            h: Math.round(r.height),
+          });
+        }
+        // 3) 带 role=tabpanel / 明显是"视图容器"的节点
+        for (const el of document.querySelectorAll('[role="tabpanel"], [data-view], main')) {
+          const r = el.getBoundingClientRect();
+          out.views.push({
+            t: (el.tagName || "?").toLowerCase(),
+            id: el.id || "",
+            c: String(el.className || "").slice(0, 50),
+            kids: el.childElementCount,
+            html: String(el.innerHTML || "").length,
+            w: Math.round(r.width),
+            h: Math.round(r.height),
+          });
+        }
+      } catch (e) {
+        out.err = String((e && e.message) || e);
+      }
+      return out;
+    }
     function samplePresence() {
       try {
         const q = (sel) => {
