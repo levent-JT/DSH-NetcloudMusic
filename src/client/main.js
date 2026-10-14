@@ -25,6 +25,64 @@
     // 这里把错误回传给宿主，读回方式：
     //   GET /plugin/netease-music/api?method=/diag
     // 上报本身失败绝不影响主流程（宁可丢日志，也不能让日志把功能带崩）。
+/**
+     * 一次性 DOM 诊断（排查"页签渲染了但看不见"这类问题）。
+     *
+     * 为什么不靠读代码：这种问题在源码里看不出来 —— 组件可能确实渲染了，
+     * 只是被藏了、被盖了、或者高度塌成 0。只有把真实 DOM 的形状取回来才能判断。
+     * elementFromPoint 尤其关键：它直接回答"内容区最上层是谁"。
+     */
+    function reportDomDiag(tag) {
+      try {
+        const pick = (sel) => {
+          const el = document.querySelector(sel);
+          if (!el) return null;
+          const cs = getComputedStyle(el);
+          const r = el.getBoundingClientRect();
+          return {
+            n: el.childElementCount,
+            w: Math.round(r.width),
+            h: Math.round(r.height),
+            top: Math.round(r.top),
+            disp: cs.display,
+            vis: cs.visibility,
+            op: cs.opacity,
+            pos: cs.position,
+            z: cs.zIndex,
+            of: cs.overflow,
+          };
+        };
+        const probe = document.querySelector(".nm-page-root") || document.querySelector(".nm-panel");
+        let hit = null;
+        if (probe) {
+          const r = probe.getBoundingClientRect();
+          const x = Math.round(r.left + r.width / 2);
+          const y = Math.round(r.top + Math.min(r.height / 2, 120));
+          const top = document.elementFromPoint(x, y);
+          hit = top
+            ? { tag: top.tagName, cls: String(top.className || "").slice(0, 80), id: top.id || "" }
+            : null;
+        }
+        reportClientError("dom-diag:" + tag, {
+          message: JSON.stringify({
+            view: store.view,
+            roots: {
+              pageRoot: pick(".nm-page-root"),
+              panel: pick(".nm-panel"),
+              panelPage: pick(".nm-panel-page"),
+              tabs: pick(".nm-tabs"),
+              pageBody: pick(".nm-page-body"),
+              amb: pick("#nm-ambient"),
+            },
+            topMostAtContentCenter: hit,
+            bodyChildren: document.body.childElementCount,
+          }),
+        });
+      } catch (e) {
+        /* 诊断失败不能影响功能 */
+      }
+    }
+
     function reportClientError(where, err) {
       try {
         const payload = {
@@ -2774,6 +2832,9 @@ div[role=presentation]:has(>div[aria-hidden=true]:first-child)>div[aria-hidden=t
           (props) => el(ViewBridge, props || {})
         )
       );
+      // 排两次：一次同步（刚注册完）、一次延迟 2.5s（等 React 提交完 + 数据拉回来）
+      reportDomDiag("sync");
+      setTimeout(() => reportDomDiag("t+2.5s"), 2500);
       slots.inject("settings.section", () =>
         slots.register({ name: "settings.section", id: "netease-music", order: 40, label: () => "网易云音乐" }, () => el(SettingsView, {}))
       );
