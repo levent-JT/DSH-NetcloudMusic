@@ -61,6 +61,68 @@
       }
     }
 
+    /** 诊断：DSH 设置弹窗（role=dialog）里的文字与背景真实数值。 */
+    function reportTextDiag(tag) {
+      try {
+        const dlg = document.querySelector('[role="dialog"]') || document.querySelector('[aria-modal="true"]');
+        const info = DshSkin.explainText(dlg || document.body);
+        reportClientError("text-diag:" + tag, { message: JSON.stringify({ tag, ...info }) });
+      } catch (e) {
+        /* 诊断失败不影响功能 */
+      }
+    }
+
+    /** 诊断：把所有不透明的亮底元素报回来（找"多出来的白块"用）。 */
+    function reportBrightSurfaces(tag) {
+      try {
+        const list = DshSkin.findBrightSurfaces(24);
+        reportClientError("bright:" + tag, { message: JSON.stringify({ tag, count: list.length, list }) });
+      } catch (e) {
+        /* 诊断失败不影响功能 */
+      }
+    }
+
+    /**
+     * 一次性把**所有**排查数据合成一条上报。
+     *
+     * 为什么必须合成一条：宿主 /diag 只保留最后一条。分组定时上报的话，
+     * 晚的那组会把早的那组顶掉 —— 我为此白跑过两轮（读回来永远只有一部分）。
+     */
+    function reportDiagAll(tag) {
+      /**
+       * 每个子探针**各自** try。
+       *
+       * 教训：第一版整个包在一个 try 里，任何一个子调用抛错就**一条都不上报** ——
+       * 表现是 /diag 永远是"(客户端尚未回传)"，而我完全不知道是为什么。
+       * 现在一个坏掉，另外两个的数据照样回来，而且失败原因会随 payload 一起上报。
+       */
+      const safe = (name, fn) => {
+        try {
+          return fn();
+        } catch (e) {
+          return { __failed: name, message: String((e && e.message) || e) };
+        }
+      };
+      const dlg = safe("dialog", () => document.querySelector('[role="dialog"]') || document.querySelector('[aria-modal="true"]'));
+      const ta = safe("textarea", () => document.querySelector("textarea"));
+      const payload = {
+        tag,
+        // 先放一个"我确实跑到了"的证据，以及依赖的函数在不在
+        env: {
+          at: new Date().toISOString(),
+          hasExplainText: typeof DshSkin.explainText === "function",
+          hasFindBright: typeof DshSkin.findBrightSurfaces === "function",
+          hasExplainFrost: typeof DshSkin.explainFrost === "function",
+          hasDialog: !!(dlg && dlg.tagName),
+          hasTextarea: !!(ta && ta.tagName),
+        },
+        text: safe("text", () => DshSkin.explainText((dlg && dlg.tagName ? dlg : document.body))),
+        bright: safe("bright", () => DshSkin.findBrightSurfaces(30)),
+        inputFrost: safe("inputFrost", () => (ta && ta.tagName ? DshSkin.explainFrost(ta.closest("form") || ta.parentElement || ta, 6) : null)),
+      };
+      reportClientError("diag-all:" + tag, { message: JSON.stringify(payload) });
+    }
+
     function reportClientError(where, err) {
       try {
         const payload = {
@@ -2872,8 +2934,11 @@ div[role=presentation]:has(>div[aria-hidden=true]:first-child)>div[aria-hidden=t
         )
       );
       // 排两次：一次同步（刚注册完）、一次延迟 2.5s（等 React 提交完 + 数据拉回来）
-      // 输入框磨砂的诊断：DSH 的组件挂载比我们晚，多采几次。
-      [3000, 8000, 15000].forEach((ms) => setTimeout(() => reportInputDockFrost("t+" + ms + "ms"), ms));
+      // 文字对比度诊断 + 输入框磨砂诊断：DSH 的组件挂载比我们晚，多采几次。
+      // 所有诊断合成一条，只发一个时间点（放晚一点，保证它是 /diag 里最后一条）。
+      // 采三次、每条都是**完整聚合**（文字 + 亮底 + 输入框），所以谁最后到都无所谓 ——
+      // 不用再掐时间点。之前为了"保证是最后一条"只发一次，用户稍早看就什么都没有。
+      [15000, 30000, 60000].forEach((ms) => setTimeout(() => reportDiagAll("t+" + ms / 1000 + "s"), ms));
       // 这里曾挂着一整套一次性 DOM 诊断（页签容器存在性时间线、输入框祖先链倒树），
       // 用来定位"组件没抛错但界面空白""输入框没磨砂"那两次故障。故障都已定位并修掉，
       // 探针撤掉；报错能力（reportClientError + 错误边界）保留。
