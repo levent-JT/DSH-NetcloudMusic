@@ -38,6 +38,39 @@ async function evaluate(wsUrl, expression) {
   if (r.exceptionDetails) throw new Error('表达式抛错: ' + JSON.stringify(r.exceptionDetails.exception || r.exceptionDetails))
   return r.result ? r.result.value : undefined
 }
+/**
+ * 截图。返回 base64（PNG）。
+ *
+ * 有了它才能"改完自己看" —— 之前只能靠用户截图转述，一轮才能确认一件事。
+ * Page.captureScreenshot 拿的是当前视口；captureBeyondViewport 让它连滚动区域一起拍。
+ */
+async function capture(wsUrl) {
+  const ws = new WebSocket(wsUrl)
+  await new Promise((ok, no) => {
+    ws.onopen = ok
+    ws.onerror = () => no(new Error('WebSocket 连接失败'))
+  })
+  const send = (id, method, params) =>
+    new Promise((ok, no) => {
+      const timer = setTimeout(() => no(new Error(method + ' 超时')), 20000)
+      const onMsg = (ev) => {
+        let m = null
+        try { m = JSON.parse(ev.data) } catch { return }
+        if (m.id !== id) return
+        clearTimeout(timer)
+        ws.removeEventListener('message', onMsg)
+        ok(m)
+      }
+      ws.addEventListener('message', onMsg)
+      ws.send(JSON.stringify({ id, method, params: params || {} }))
+    })
+  await send(90, 'Page.enable')
+  const r = await send(91, 'Page.captureScreenshot', { format: 'png', captureBeyondViewport: false })
+  ws.close()
+  if (r.error) throw new Error('截图失败: ' + JSON.stringify(r.error))
+  return r.result && r.result.data
+}
+
 const args = argv.slice(2)
 if (!args.length || args[0] === '--help' || args[0] === '-h') {
   console.log('用法: node scripts/cdp.mjs [--list] [--target <序号或标题片段>] "<表达式>"')
@@ -48,6 +81,17 @@ try {
   if (args[0] === '--list') {
     console.log('目标 ' + list.length + ' 个:')
     list.forEach((t, i) => console.log('  [' + i + '] ' + t.type + '  ' + String(t.title || '').slice(0, 50) + '  ' + String(t.url || '').slice(0, 60)))
+    process.exit(0)
+  }
+  if (args[0] === '--shot') {
+    const out = args[1] || 'shot.png'
+    const t = pick(list, args[2] || null)
+    const data = await capture(t.webSocketDebuggerUrl)
+    if (!data) throw new Error('没拿到截图数据')
+    const buf = Buffer.from(data, 'base64')
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(out, buf)
+    console.log('已保存 ' + out + '（' + Math.round(buf.length / 1024) + ' KB，来自「' + String(t.title || '').slice(0, 30) + '」）')
     process.exit(0)
   }
   let hint = null, expr = args.join(' ')

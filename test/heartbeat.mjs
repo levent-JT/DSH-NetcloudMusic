@@ -211,11 +211,19 @@ try {
   render()
   ok(click(findByText('推荐')), '切到「推荐」子页签（每日推荐）')
   await flush(); render()
-  const loadDaily = seenNodes.find((n) => (n.props && n.props.children) === '点击加载每日推荐' && typeof n.props.onClick === 'function')
-  if (loadDaily) {
-    ok(click(loadDaily), '先加载每日推荐')
-    await flush(); render()
-  }
+  // 每日推荐现在是**自动加载**的，不该再找"点击加载"那个入口。
+  // 这里原本写的是 `if (loadDaily) { ok(...) }` —— 一个没有 else 的 if，
+  // 改掉文案后它整段静默跳过，断言数从 24 掉到 23 而没人发现。
+  // 所以下面一律用断言，不用条件跳过。
+  const retryHint = seenNodes.find((n) => n.props && typeof n.props.onClick === 'function'
+    && typeof n.props.children === 'string' && n.props.children.indexOf('点击重试') >= 0)
+  ok(!retryHint, '每日推荐没有落到"加载失败"分支（说明自动加载成功了）', retryHint ? retryHint.props.children : '')
+  const autoLoaded = !!seenNodes.find((n) => n.props && n.props.songs && n.props.songs.length)
+  ok(autoLoaded, '★ 每日推荐已自动加载（不需要点任何按钮）')
+  // 顺带验证逐条渐入挂上了，且序号封顶（这里是第 0、1 条）
+  const riseNodes = seenNodes.filter((n) => typeof n.props?.className === 'string' && n.props.className.indexOf('nm-rise') >= 0)
+  ok(riseNodes.length > 0, '★ 列表带上了逐条渐入的类名', '共 ' + riseNodes.length + ' 个')
+  ok(riseNodes.every((n) => Number(n.props.style && n.props.style['--nm-i']) <= 18), '渐入序号已封顶（<=18）')
   const playAll = seenNodes.find((n) => (n.props && n.props.children) === '播放全部' && typeof n.props.onClick === 'function')
   ok(!!playAll, '每日推荐里有「播放全部」')
   ok(!!playAll && playAll.props.disabled !== true, '「播放全部」是可点的（不是 disabled）')

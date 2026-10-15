@@ -932,6 +932,56 @@
     }
 
     // ------------------------------------------------------------- data views
+    /**
+     * 自动加载：进视图就拉，不用再点一下。
+     *
+     * **同一把 key 只尝试一次** —— 失败时若每次都重试，视图每 render 一次就发一个请求，
+     * 而且失败会立刻再失败，等于自己给自己造请求风暴。
+     * 失败后界面上仍留着"点击重试"，手动路径不受这里限制。
+     *
+     * key 里带 uid：换账号是新 key，会重新自动拉一次。
+     */
+    const autoLoadTried = new Set();
+    function autoLoadKey(view) {
+      // 账号 id 在 store.login.profile.userId（login 是 /login/status 的 data）
+      const uid = (store.login && store.login.profile && store.login.profile.userId) || "anon";
+      return view + ":" + uid;
+    }
+    function hasTriedAutoLoad(view) {
+      return autoLoadTried.has(autoLoadKey(view));
+    }
+    function autoLoadOnce(view, fn) {
+      const key = autoLoadKey(view);
+      if (autoLoadTried.has(key)) return;
+      // ★ 有别的加载在跑时**不记账**直接返回。
+      // 这里的坑：所有加载函数共用 store.loadingView 这一个闸，
+      // 如果这时记账，就等于宣布"这个视图已经试过"，而实际一个请求都没发出去 ——
+      // 之后永远不会再试，界面永远停在"正在加载…"。
+      // 不记账 + 把 store.loadingView 放进 effect 依赖，等它空了自然会再进来。
+      if (store.loadingView) return;
+      autoLoadTried.add(key); // 同步标记，避免同一帧被并发触发两次
+      Promise.resolve()
+        .then(fn)
+        .catch(() => {
+          /* 失败不自动重试 */
+        });
+    }
+
+    /**
+     * 逐条渐入：返回 null 表示这条不参与动画。
+     *
+     * 两个封顶都是有原因的：
+     *   · 条数封顶 40：动画期间每个元素都是一个合成层，几百条同时入场会明显掉帧；
+     *     而首屏最多看到十几条，40 条足够覆盖。
+     *   · 序号封顶 18：延迟是 index × 26ms，不封顶的话第 200 条要等 5 秒才出来。
+     */
+    const RISE_MAX_ROWS = 40;
+    const RISE_MAX_INDEX = 18;
+    function riseProps(index) {
+      if (index === undefined || index === null || index >= RISE_MAX_ROWS) return null;
+      return { cls: " nm-rise", style: { "--nm-i": Math.min(index, RISE_MAX_INDEX) } };
+    }
+
     async function loadDaily(autoplay) {
       if (store.loadingView) return;
       store.loadingView = "daily";
@@ -1011,8 +1061,15 @@
       store.loadingView = "playlists";
       emit();
       try {
-        const status = await api("/login/status", {});
-        const uid = status.data && ((status.data.account && status.data.account.id) || (status.data.profile && status.data.profile.userId));
+        // uid 直接从 store.login 取 —— 它是 /login/status 的 data，登录时已经拿过了。
+        // 这里原本又 await 一次 /login/status，是多余的往返：多花一个 RTT，
+        // 而且一旦这步没走到，界面就永远停在"正在加载歌单…"（自动加载时踩到过）。
+        // 保留一次兜底：store.login 还没有 profile 时（比如刚刷新还没拿到登录态）才补请求。
+        let uid = store.login && store.login.profile && store.login.profile.userId;
+        if (!uid) {
+          const status = await api("/login/status", {});
+          uid = status.data && ((status.data.account && status.data.account.id) || (status.data.profile && status.data.profile.userId));
+        }
         if (!uid) {
           setNotice("未登录，无法获取歌单");
           return;
@@ -1462,9 +1519,15 @@
       // 红心状态会随 store.likedIds 变化，这里必须订阅，否则点了不变色
       useStore();
       const isCurrent = store.song && store.song.id === song.id;
+      // 逐条渐入只在挂载时跑一次；后续 re-render（比如每秒的时间广播）不会重播
+      const rise = riseProps(p.index);
       return el(
         "div",
-        { className: "nm-songrow" + (isCurrent ? " nm-songrow-current" : ""), onClick: p.onPlay },
+        {
+          className: "nm-songrow" + (isCurrent ? " nm-songrow-current" : "") + (rise ? rise.cls : ""),
+          style: rise ? rise.style : undefined,
+          onClick: p.onPlay,
+        },
         el(Cover, { src: song.pic, size: 36 }),
         el("div", { className: "nm-songrow-meta" },
           el("div", { className: "nm-songrow-name" }, song.name),
@@ -1535,7 +1598,7 @@
         "div",
         { className: "nm-songlist" },
         p.songs.map((song, i) =>
-          el(SongRow, { key: song.id, song, onPlay: () => playSongs(p.songs, i, { source: p.source }) })
+          el(SongRow, { key: song.id, song, index: i, onPlay: () => playSongs(p.songs, i, { source: p.source }) })
         )
       );
     }
@@ -1555,13 +1618,22 @@
     function DailyView() {
       useStore();
       const loading = store.loadingView === "daily";
+      // "还没试过"也算忙 —— 否则 useLayoutEffect/useEffect 之间那一帧会闪一下"点击加载"
+      const pending = store.login && !store.dailySongs.length && !hasTriedAutoLoad("daily");
+      useEffect(() => {
+        if (store.login && !store.dailySongs.length) autoLoadOnce("daily", () => loadDaily(false));
+        // loadingView 也在依赖里：别的加载占着闸时 autoLoadOnce 会直接返回（不记账），
+        // 等它空了这次 effect 会再跑一遍，才能真正发出去。
+      }, [store.login, store.dailySongs.length, store.loadingView]);
+      const busy = loading || pending;
       return el(
         LoginGate,
         {},
-        el(ViewHeader, { title: "每日推荐", action: { label: loading ? "加载中…" : "播放全部", disabled: loading || !store.dailySongs.length, onClick: () => playSongs(store.dailySongs, 0) } }),
-        loading ? el("div", { className: "nm-hint" }, "正在加载每日推荐…")
+        el(ViewHeader, { title: "每日推荐", action: { label: busy ? "加载中…" : "播放全部", disabled: busy || !store.dailySongs.length, onClick: () => playSongs(store.dailySongs, 0) } }),
+        busy ? el("div", { className: "nm-hint" }, "正在加载每日推荐…")
           : store.dailySongs.length ? el(SongList, { songs: store.dailySongs })
-          : el("div", { className: "nm-hint nm-clickable", onClick: () => loadDaily(false) }, "点击加载每日推荐")
+          // 走到这里只可能是"自动加载试过但失败了"
+          : el("div", { className: "nm-hint nm-clickable", onClick: () => loadDaily(false) }, "每日推荐加载失败，点击重试")
       );
     }
 
@@ -1585,7 +1657,7 @@
               "div",
               { className: "nm-view" },
               hasLists ? el("div", { className: "nm-section" }, "歌单") : null,
-              hasLists ? el("div", { className: "nm-playlist-grid" }, store.playlistSearchResults.map((pl) => el(PlaylistCard, { key: pl.id, playlist: pl, onOpen: () => openPlaylist(pl.id, false) }))) : null,
+              hasLists ? el("div", { className: "nm-playlist-grid" }, store.playlistSearchResults.map((pl, i) => el(PlaylistCard, { key: pl.id, index: i, playlist: pl, onOpen: () => openPlaylist(pl.id, false) }))) : null,
               store.searchResults.length ? el("div", { className: "nm-section" }, "歌曲") : null,
               store.searchResults.length ? el(SongList, { songs: store.searchResults }) : null
             )
@@ -1598,7 +1670,11 @@
       const pl = p.playlist;
       return el(
         "div",
-        { className: "nm-playlist-card", onClick: p.onOpen },
+        {
+          className: "nm-playlist-card" + (riseProps(p.index) ? riseProps(p.index).cls : ""),
+          style: riseProps(p.index) ? riseProps(p.index).style : undefined,
+          onClick: p.onOpen,
+        },
         el(Cover, { src: pl.coverImgUrl, size: 44 }),
         el("div", { className: "nm-playlist-meta" },
           el("div", { className: "nm-playlist-name" }, pl.name),
@@ -1616,9 +1692,13 @@
     function PlaylistView() {
       useStore();
       const open = store.playlistOpen;
+      // 注意：这里**没有**自动加载 —— 歌单的自动拉取有一个时序问题没解决
+      // （上一个加载还占着 store.loadingView 时会被闸掉），本轮先保留点击加载。
+      // 每日推荐的自动加载是已验证通过的，见 DailyView。
       if (open) {
-        // 队列来源要透传给 playSongs：播放模式里的「心动模式」那一档
-        // 只有在当前歌单是我喜欢的音乐时才出现（接口对其余类型返回 400）。
+        // 队列来源只是透传给 playSongs 记账，**不影响心动模式能否开启** ——
+        // 心动只要求"已登录 + 有红心歌单 id"，种子歌单永远是「我喜欢的音乐」，
+        // 与此刻在播哪个歌单无关（见 AGENTS.md §2 的接口实测矩阵）。
         const source = { id: open.id, specialType: open.specialType };
         return el(
           "div",
@@ -1639,7 +1719,7 @@
             ? el("div", { className: "nm-hint" }, "正在加载歌单…")
             : store.playlists
               ? store.playlists.length
-                ? el("div", { className: "nm-playlist-grid" }, store.playlists.map((pl) => el(PlaylistCard, { key: pl.id, playlist: pl, onOpen: () => openPlaylist(pl.id, false) })))
+                ? el("div", { className: "nm-playlist-grid" }, store.playlists.map((pl, i) => el(PlaylistCard, { key: pl.id, index: i, playlist: pl, onOpen: () => openPlaylist(pl.id, false) })))
                 : el("div", { className: "nm-hint" }, "没有歌单")
               : el("div", { className: "nm-hint nm-clickable", onClick: () => loadUserPlaylists() }, "点击加载我的歌单"))
       );
@@ -2529,9 +2609,12 @@
 /* 玻璃化：这个类由 JS 动态加到 DSH 自己的面板上 —— 判据是"它的背景色等于我们注入的
    rgba"，所以不依赖 DSH 的哈希类名，菜单/抽屉/输入框/新弹出的浮层都能覆盖到。
    毛玻璃把背后的内容磨成一片均匀的底，于是"面板透明"和"文字清楚"可以同时成立。 */
+/* blur 幅度由 JS 按**元素面积**写进 --nm-blur：
+   backdrop-filter 的合成代价与面积近似成正比，而大面板上 18px 和 8px 的观感差别很小。
+   实测最大的两块是 1000×221（占全部磨砂面积的 38%），它们从 18px 降到 8px。 */
 .nm-frost{
-  backdrop-filter:blur(18px) saturate(150%);
-  -webkit-backdrop-filter:blur(18px) saturate(150%)}
+  backdrop-filter:blur(var(--nm-blur,18px)) saturate(150%);
+  -webkit-backdrop-filter:blur(var(--nm-blur,18px)) saturate(150%)}
 /* 弹窗的整屏遮罩层 —— 这一条才是"弹层明显更高"的观感来源。
    做法照抄 @kenz1117/dsh-ui-usage-billing（已在本机跑通、效果就是用户想要的那种）：
    DSH 的弹窗结构是 div[role=presentation] > div[aria-hidden=true]，遮罩是它的首个子节点。
@@ -2585,6 +2668,14 @@ div[role=presentation]:has(>div[aria-hidden=true]:first-child)>div[aria-hidden=t
   0%,100%{transform:translateY(0) scale(1)}
   50%{transform:translateY(-7px) scale(1.014)}
 }
+
+/* ── 列表逐条渐入 ─────────────────────────────────────────────────
+   从一开始就只动 opacity 和 transform —— 这两个属性走合成层，不会触发布局/重绘。
+   延迟由行内样式写进来的 --nm-i 决定（序号在 JS 侧已封顶，见 riseProps）。
+   尊重系统的"减少动态效果"。 */
+@keyframes nm-rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.nm-rise{animation:nm-rise .34s cubic-bezier(.22,.61,.36,1) both;animation-delay:calc(var(--nm-i,0) * 26ms)}
+@media (prefers-reduced-motion:reduce){.nm-rise{animation:none}}
 
 /* ── 播放页样式 · 青春彩胶 ─────────────────────────────────────────
    官方【青春彩胶】："造型简单的透明底座和指针，让视觉焦点更聚焦在颜色变化上；

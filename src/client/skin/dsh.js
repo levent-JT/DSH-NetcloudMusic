@@ -311,7 +311,9 @@ const DshSkin = (() => {
       if (el.closest && el.closest("[data-plugin^='dsh-netease']")) return 'our-plugin';
       if (frostMode === 'off') return 'mode-off';
       const r = el.getBoundingClientRect();
-      if (r.width < 48 || r.height < 28) return 'too-small'; // 太小不值得磨砂，省掉大量无用合成层
+      // 下限 80×36：再小的元素本来也看不出磨砂，却各占一个合成层。
+      // （原来 48×28，实测多出来的都是这种小不点。）
+      if (r.width < 80 || r.height < 36) return 'too-small';
       const vw = window.innerWidth || 1;
       const vh = window.innerHeight || 1;
       let tall = false;
@@ -467,21 +469,45 @@ const DshSkin = (() => {
       return out;
     }
 
+    /**
+     * 按面积决定模糊幅度。
+     *
+     * 依据：backdrop-filter 的合成代价与**面积**近似成正比（不是与 blur 半径成正比），
+     * 而目视上 18px 和 8px 在大面板上的差别很小 —— 大面板本来就要被磨成一片均匀的底。
+     * 实测最大的两块是 1000×221，占全部磨砂面积的 38%。
+     */
+    function blurForArea(area) {
+      if (area > 120000) return "8px";
+      if (area > 40000) return "12px";
+      return "18px";
+    }
+
     function frostScan(root) {
       if (!injectedKeys.size || !document.body) return 0;
+      // 收 {el, area} 而不是只收 el —— 面积在**读**这一趟就量好，
+      // 写那一趟直接拿来用。否则写的时候再读 rect 会强制重排（原来注释里那条教训）。
       const hits = [];
       const self = root && root.nodeType === 1 ? root : null;
-      if (self && frostMatches(self)) hits.push(self);
+      if (self && frostMatches(self)) {
+        const r0 = self.getBoundingClientRect();
+        hits.push({ el: self, area: r0.width * r0.height });
+      }
       const scope = self || document.body;
       if (scope.querySelectorAll) {
         for (const el of scope.querySelectorAll("*")) {
-          if (frostMatches(el)) hits.push(el);
+          if (frostMatches(el)) {
+            const r1 = el.getBoundingClientRect();
+            hits.push({ el, area: r1.width * r1.height });
+          }
         }
       }
       // 读和写分两趟：frostMatches 里要读 getBoundingClientRect，
       // 而加 class 会让布局失效 —— 边读边写的话，每个元素都会强制重排一次
       // （几千个节点就是几千次重排）。先收集、后写，整趟只排一次。
-      for (const el of hits) el.classList.add(FROST_CLASS);
+      for (const hit of hits) {
+        hit.el.classList.add(FROST_CLASS);
+        hit.el.style.setProperty("--nm-blur", blurForArea(hit.area));
+      }
       return hits.length;
     }
 
@@ -764,7 +790,10 @@ const DshSkin = (() => {
     /** 只撤 class，不动观察器（判据更新时用）。 */
     function removeAllFrost() {
       if (!document.body) return;
-      for (const el of document.querySelectorAll("." + FROST_CLASS)) el.classList.remove(FROST_CLASS);
+      for (const el of document.querySelectorAll("." + FROST_CLASS)) {
+        el.classList.remove(FROST_CLASS);
+        el.style.removeProperty("--nm-blur");
+      }
     }
 
     function clearAmbientTokens() {
