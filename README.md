@@ -6,6 +6,17 @@
 
 ---
 
+## 截图
+
+| 每日推荐 | 播放器 |
+|---|---|
+| ![每日推荐](docs/screenshots/daily.png) | ![播放器](docs/screenshots/player.png) |
+| 进页签自动加载，列表自上而下逐条渐入 | 沉浸式背景：封面取色铺满全屏，歌词居中 |
+
+| 我的歌单 | 设置 |
+|---|---|
+| ![我的歌单](docs/screenshots/playlists.png) | ![设置](docs/screenshots/settings.png) |
+| 同样进页签自动加载 | 含 DSH 皮肤总开关（关掉后 DSH 恢复原生外观，听歌功能不受影响） |
 ## 功能
 
 | 模块 | 说明 |

@@ -1,7 +1,6 @@
 {
   "name": "dsh-netease-music",
   "version": "0.1.0",
-  "private": true,
   "description": "DSH 网易云音乐播放插件（直连模式）：每日推荐 / 我的歌单 / 音质选择 / 歌词。零第三方依赖，不经本地 API 服务。",
   "type": "module",
   "main": "lib/index.js",
@@ -21,6 +20,25 @@
       ]
     }
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/levent-JT/DSH-NetcloudMusic.git"
+  },
+  "homepage": "https://github.com/levent-JT/DSH-NetcloudMusic#readme",
+  "bugs": {
+    "url": "https://github.com/levent-JT/DSH-NetcloudMusic/issues"
+  },
+  "keywords": [
+    "deepseek",
+    "harness",
+    "dsh",
+    "dsh-plugin",
+    "netease",
+    "music",
+    "网易云音乐",
+    "player"
+  ],
+  "author": "levent-JT",
   "dependencies": {},
   "license": "MIT",
   "files": [
@@ -30,5 +48,8 @@
     "cordis.patch.yml",
     "THIRD-PARTY-NOTICES.md",
     "LICENSE"
-  ]
+  ],
+  "engines": {
+    "dsh": ">=0.1.0"
+  }
 }
