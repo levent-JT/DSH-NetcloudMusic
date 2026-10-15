@@ -2751,7 +2751,15 @@
 .nm-amb-line.on .nm-amb-tr{color:rgba(255,255,255,.62)}
 
 /* ── 整页：玻璃卡片浮在背景上 ───────────────────────────────────── */
-.nm-page-root{height:100%;min-height:0;display:flex;flex-direction:column;padding:10px 12px 12px}
+/* ⚠️ 别删这两条。它们修的是"点开网易云音乐直接滚到底"。
+   根因：DSH 的视图容器是 flex:1 0 auto（flex-shrink:0，拒绝收缩），
+   于是它长到我们内容的高度而不是缩进滚动容器，height:100% 就参照了错的值，
+   内层 overflow-y:auto 永不触发，滚动被丢给外层那个"聊天用、默认停在底部"的容器。
+   让装着我们的那个 viewArea 允许收缩（min-height:0 配套），滚动才会落回面板自己。
+   :has(.nm-page-root) 是刻意的：别的视图一个都不受影响。
+   DSH 升级后 hash 变了会失配 —— 那时的表现只是退回旧行为（页面能滚），不会坏。 */
+[class*="_viewArea"]:has(.nm-page-root){flex-shrink:1 !important;min-height:0 !important}
+.nm-page-root{height:100%;min-height:0;display:flex;flex-direction:column;padding:10px 12px 12px;overflow:hidden}
 .nm-heartbeat-on{color:#ff6b81 !important;border-color:rgba(255,107,129,.55) !important;background:rgba(255,107,129,.14) !important}
 .nm-heartbeat-on:hover{background:rgba(255,107,129,.22) !important}
 .nm-crash{margin:20px;padding:16px 18px;border-radius:12px;background:rgba(220,60,60,.14);border:1px solid rgba(220,60,60,.45);color:#ffd9d9;font-size:13px;line-height:1.6;word-break:break-all}

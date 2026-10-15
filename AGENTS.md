@@ -468,6 +468,44 @@ React 组件抛错会**卸载整个 root**，表现是"一片空白、什么都�
 - **断言总数是一个信号**：数字变了就要问为什么。这次是 24→23，我差点当成"改文案的正常代价"。
 - 断言失败时**把现场打出来**（比如"实际发出的请求列表"），不要只说"没找到"。
   这次就是靠打印实际调用列表，才看出请求根本没发出去。
+### #18 DSH 的视图容器是 flex-shrink:0 —— height:100% 会参照错的父高
+
+**症状**（用户报的）："点开网易云音乐，很容易直接滚动条拉到底"。
+而且**是我这轮加完自动加载之后才明显** —— 以前进来列表是空的，现在一进来就有内容。
+
+**CDP 实测的断链点**（不是猜的）：
+
+```
+Dc7zOa_scrollBody   flex/column  高704  scroll1696  overflow:auto   ← 真正的滚动容器（聊天用的）
+Dc7zOa_viewArea     flex: 1 0 auto            高1568                ← ★ flex-shrink:0，拒绝收缩
+nm-page-root        height:100% → 1545px（跟着内容走）
+nm-panel-body       client == scroll   →  overflow-y:auto 永不触发
+```
+
+`flex: 1 0 auto` 意味着 `flex-shrink: 0`：视图容器**长到内容高度**而不是缩进滚动容器。
+我们 `.nm-page-root { height: 100% }` 参照的是那个被撑高的 1545px，
+于是 `.nm-panel-body` 自己的滚动条永远不动，整页滚动被丢给外层的 `scrollBody` ——
+**而那个容器是聊天用的、默认就停在底部**，所以点开就落在页面最底。
+
+**修法**（两行 CSS，已在 `main.js` 的 `.nm-page-root` 上方）：
+
+```css
+[class*="_viewArea"]:has(.nm-page-root){flex-shrink:1 !important;min-height:0 !important}
+.nm-page-root{...;overflow:hidden}
+```
+
+`:has(.nm-page-root)` 是刻意的 —— **只命中"里面装着我们"的那个 viewArea，别的视图一个都不受影响**。
+DSH 升级后 hash 变了会失配：**失配只是退回旧行为（页面能滚），不会坏**。
+
+**实测对比**（刷新后、纯源码生效）：
+
+```
+修前  外层 scrollBody top=992  max=992   面板体 max=0      viewArea高 1568
+修后  外层 scrollBody top=0    max=0     面板体 max=1037   viewArea高 576
+```
+
+**教训**：插件视图的"高度 100%"不能想当然。**先量祖先链，确认"确定高度"在哪一层断掉**，
+再决定修哪一层 —— 我一开始只盯着自己的 CSS 看，什么问题都看不出来。
 ### #14 CRLF
 
 仓库里的文件全是 CRLF。脚本里做多行字符串替换时**必须把 `\n` 换成 `\r\n`**，
