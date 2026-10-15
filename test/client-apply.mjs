@@ -10,7 +10,8 @@
 //   3) 通过 stub 的 /state 接口把一首歌灌进去 —— 这样才会走到
 //      「有封面」的那条分支（没封面时 AmbientBg 直接 return null，测不到东西）。
 import fs from 'node:fs'
-import vm from 'node:vm'
+// 说明：这里刻意不用 vm —— 作用域探针需要 with()，而 with 只在
+// new Function 出来的非严格函数体里可用（vm.runInContext 也不行）。
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -112,12 +113,17 @@ const React = {
   useReducer(r, init) { hookIndex++; return [init, () => {}] },
   useSyncExternalStore(subscribe, getSnapshot) {
     hookIndex++
-    // 把订阅接上：收到通知就重渲染整个 root —— 这样 apply 之后
-    // pushSkin() 把封面推进去时，AmbientBg 会带着真实数据再渲染一次。
+    // 按"订阅线"登记一次即可（subscribe/subscribeClock 都是稳定函数，正好当 key）。
+    // 这样能回答真正的问题：一次 timeupdate 会不会惊动订阅全局版本号的那条线。
     try {
-      subscribe(() => {
-        if (currentRerender) currentRerender()
-      })
+      if (!lineSubs.has(subscribe)) {
+        lineSubs.set(subscribe, { fired: 0, labels: 0 })
+        subscribe(() => {
+          lineSubs.get(subscribe).fired += 1
+          if (currentRerender) currentRerender()
+        })
+      }
+      lineSubs.get(subscribe).labels += 1
     } catch {
       /* ignore */
     }
@@ -141,6 +147,8 @@ const ReactProxy = new Proxy(React, {
 })
 
 let rendered = 0
+/** 订阅线 -> { fired: 被唤醒次数, labels: 有几个组件订阅了它 } */
+const lineSubs = new Map()
 let renderError = null
 
 /** class 组件（错误边界就是 class）必须 new 出来再调 render()，不能当函数调。 */
@@ -244,6 +252,19 @@ function fakeFetch(url) {
   })
 }
 
+// ── Audio 桩：用来驱动 timeupdate，量「时间单独一条订阅线」的效果 ──────
+const audioStub = {
+  paused: true, currentTime: 0, duration: 200, volume: 0.8, src: '', preload: '',
+  _l: {},
+  addEventListener(k, f) { (this._l[k] = this._l[k] || []).push(f) },
+  removeEventListener() {},
+  play() { this.paused = false; (this._l.play || []).forEach((f) => f()) },
+  pause() { this.paused = true; (this._l.pause || []).forEach((f) => f()) },
+  load() {},
+  removeAttribute() {},
+  fire(k) { (this._l[k] || []).forEach((f) => f()) },
+}
+
 // ── 沙箱 ─────────────────────────────────────────────────────────────
 let captured = null
 const timers = []
@@ -267,6 +288,7 @@ const sandbox = {
   URLSearchParams,
   Uint8ClampedArray,
   Image: function () { this.crossOrigin = ''; this.src = '' },
+  Audio: function () { return audioStub },
   MutationObserver: function () { this.observe = () => {}; this.disconnect = () => {} },
   AbortSignal: { timeout: () => ({}) },
   fetch: fakeFetch,
@@ -324,8 +346,28 @@ try {
     },
   }
   ctxObj.globalThis = ctxObj
-  vm.createContext(ctxObj)
-  vm.runInContext(code, ctxObj, { filename: 'lib/client.js' })
+
+  // ── 作用域探针 ────────────────────────────────────────────────────────
+  // with(scope) 让所有自由标识符都走 scope 的 get。get 收到不在真实全局里的
+  // 名字 = 一次「用了但不在作用域里」的引用（activeLyricIndex 就是这么漏过去的）。
+  const freeRefs = new Map() // 名字 -> 出现次数
+  const scope = new Proxy(ctxObj, {
+    has() {
+      return true
+    },
+    get(target, key) {
+      if (key === Symbol.unscopables) return undefined
+      if (key in target) return target[key]
+      // 回落真实全局：Object / Math / JSON / Promise 这些本来就不在沙箱里
+      if (key in globalThis) return globalThis[key]
+      // 沙箱和真实全局都没有 → 这个名字不在当前作用域里
+      freeRefs.set(String(key), (freeRefs.get(String(key)) || 0) + 1)
+      return undefined
+    },
+  })
+
+  const runner = new Function('__scope', 'with(__scope){\n' + code + '\n}')
+  runner(scope)
   if (!captured) throw new Error('ModuleLoader.load 没有被调用')
 
   const mod = captured.factory((id) => {
@@ -370,6 +412,19 @@ try {
   }
   if (declaredHooks) note('用到了 ' + declaredHooks + ' 次未 stub 的 React API')
 
+  // ── 自由引用报告：这就是「用了但不在作用域里」的清单 ──────────────────
+  const notReal = [...freeRefs.entries()]
+  ok(
+    notReal.length === 0,
+    '没有「用了但不在作用域里」的标识符',
+    notReal.length ? notReal.map(([k, n]) => k + '×' + n).join(', ') : '（探针跑完全程，一个都没有）',
+  )
+  if (notReal.length) {
+    console.log('')
+    console.log('  ── 不在作用域里却被引用的名字 ──')
+    for (const [k, n] of notReal) console.log('     ' + k.padEnd(28) + '引用 ' + n + ' 次')
+  }
+
   // ── 逐个点开每个子页签并渲染 ──────────────────────────────────────────
   // 这一步是这次事故的照妖镜：只在某个视图里用到的符号没定义，
   // 只渲染默认视图是发现不了的（activeLyricIndex 就是这么漏过去的）。
@@ -409,6 +464,37 @@ try {
       console.log('     ' + v.err.message)
       String(v.err.stack || '').split('\n').slice(0, 10).forEach((l) => console.log('     ' + l.trim()))
     }
+  }
+
+  // ── 时间订阅线的不变量 ────────────────────────────────────────────────
+  // 说明：这个 harness 没有真正的 React 调度器，也不走真实播放链路，
+  // 所以"每次 timeupdate 有几个组件重渲染"量不出来。与其印一个误导的数字，
+  // 不如把不变量钉死 —— 它们是这次性能改动真正的内容。
+  {
+    const raw = fs.readFileSync(FILE, 'utf8')
+    ok(/function emitClock()/.test(raw), '存在轻量时间线 emitClock')
+    ok(/function useClock()/.test(raw), '存在 useClock')
+
+    // emitClock 绝不能惊动版本线的监听者
+    const em = raw.slice(raw.indexOf('function emitClock()'))
+    const body = em.slice(0, em.indexOf('\n    }'))
+    ok(!/for \(const listener of \[\.\.\.listeners\]\)/.test(body), 'emitClock 不碰 version 线的监听者')
+    ok(/clockListeners/.test(body), 'emitClock 只推 clock 线')
+
+    // timeupdate 必须走轻量线
+    const tu = raw.slice(raw.indexOf('addEventListener("timeupdate"'))
+    const tuBody = tu.slice(0, tu.indexOf('});'))
+    ok(/emitClock\(\)/.test(tuBody), 'timeupdate 走的是 emitClock（不是 emit）')
+    ok(!/[^k]emit\(\)/.test(tuBody.replace('emitClock', '')), 'timeupdate 里没有调用全量 emit')
+
+    // 皮肤必须两条线都挂 —— 这是自我审查抓到的那个回归
+    ok(/skinUnsub = subscribe\(pushSkin\)/.test(raw), 'pushSkin 挂在 version 线')
+    ok(/skinClockUnsub = subscribeClock\(pushSkin\)/.test(raw), '★ pushSkin 也挂在 clock 线（否则背景歌词卡住不动）')
+    ok(/skinClockUnsub\(\)/.test(raw), 'teardown 里解绑了 clock 线')
+
+    // 只有真的显示时间/进度的组件订阅时钟
+    const clockUsers = (raw.match(/useClock\(\)/g) || []).length
+    ok(clockUsers >= 4 && clockUsers <= 6, '订阅时钟的组件数量收敛（4~6 个，不是全部）', '实测 ' + clockUsers + ' 个（含定义 1 处）')
   }
 
   // ── 渲染每个注册的组件（播放器标签、侧栏卡片、设置页）──────────────

@@ -127,9 +127,41 @@ const SkinLayers = (() => {
     function getSnapshot() {
       return snapshot;
     }
-    /** 由音乐侧推入。整体换引用，useSyncExternalStore 才会认到变化。 */
+    /** 上一次通知时"看得见的东西"的样子。 */
+    let lastLine = -2;
+    /**
+     * 由音乐侧推入。
+     *
+     * 只在**看得见的东西**变了才换 snapshot 并通知：
+     * 背景只关心封面、是否在播、当前是哪一行歌词、以及量化的进度。
+     * 原来是无条件 { ...snapshot, ...next } —— timeupdate 每秒 4~5 次，
+     * 每次都换引用、每次都通知，146 行的 8 层图层树就跟着整体重渲染。
+     *
+     * 进度量化到 1%：背景那层进度条看不出 1% 以内的差别，
+     * 但"每帧都不同"足以让整棵树白渲染。
+     *
+     * 注意 snapshot 只在真变化时才换引用 —— useSyncExternalStore 要求
+     * getSnapshot 在没变化时返回同一个值，否则 React 会判定它在无限变化。
+     */
     function update(next) {
-      snapshot = { ...snapshot, ...(next || {}) };
+      const n = next || {};
+      const lyrics = n.lyrics || [];
+      const cover = n.cover || "";
+      const playing = !!n.playing;
+      const line = activeLyricIndex(lyrics, n.time || 0);
+      const progress = Math.round((n.progress || 0) * 100) / 100;
+      const config = n.config || {};
+      if (
+        cover === snapshot.cover &&
+        playing === snapshot.playing &&
+        line === lastLine &&
+        progress === snapshot.progress &&
+        config === snapshot.config
+      ) {
+        return; // 看得见的都没变：不换引用、不通知
+      }
+      lastLine = line;
+      snapshot = { cover, lyrics, time: n.time || 0, progress, playing, config };
       for (const cb of [...skinListeners]) cb();
     }
 

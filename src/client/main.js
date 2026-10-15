@@ -19,70 +19,6 @@
       return h.apply(null, args);
     }
 
-    // ── 运行期错误上报 ──────────────────────────────────────────────────
-    // 客户端跑在 DSH 的渲染进程里，它的控制台我们够不到 —— 出了问题只能靠猜，
-    // 这次就是这么栽的：改完只做了静态检查，一上线整个标签都崩了，却拿不到报错。
-    // 这里把错误回传给宿主，读回方式：
-    //   GET /plugin/netease-music/api?method=/diag
-    // 上报本身失败绝不影响主流程（宁可丢日志，也不能让日志把功能带崩）。
-/**
-     * 一次性 DOM 诊断（排查"页签渲染了但看不见"这类问题）。
-     *
-     * 为什么不靠读代码：这种问题在源码里看不出来 —— 组件可能确实渲染了，
-     * 只是被藏了、被盖了、或者高度塌成 0。只有把真实 DOM 的形状取回来才能判断。
-     * elementFromPoint 尤其关键：它直接回答"内容区最上层是谁"。
-     */
-    function reportDomDiag(tag) {
-      try {
-        const pick = (sel) => {
-          const el = document.querySelector(sel);
-          if (!el) return null;
-          const cs = getComputedStyle(el);
-          const r = el.getBoundingClientRect();
-          return {
-            n: el.childElementCount,
-            w: Math.round(r.width),
-            h: Math.round(r.height),
-            top: Math.round(r.top),
-            disp: cs.display,
-            vis: cs.visibility,
-            op: cs.opacity,
-            pos: cs.position,
-            z: cs.zIndex,
-            of: cs.overflow,
-          };
-        };
-        const probe = document.querySelector(".nm-page-root") || document.querySelector(".nm-panel");
-        let hit = null;
-        if (probe) {
-          const r = probe.getBoundingClientRect();
-          const x = Math.round(r.left + r.width / 2);
-          const y = Math.round(r.top + Math.min(r.height / 2, 120));
-          const top = document.elementFromPoint(x, y);
-          hit = top
-            ? { tag: top.tagName, cls: String(top.className || "").slice(0, 80), id: top.id || "" }
-            : null;
-        }
-        const snap = {
-            view: store.view,
-            roots: {
-              pageRoot: pick(".nm-page-root"),
-              panel: pick(".nm-panel"),
-              panelPage: pick(".nm-panel-page"),
-              tabs: pick(".nm-tabs"),
-              pageBody: pick(".nm-page-body"),
-              amb: pick("#nm-ambient"),
-            },
-          topMostAtContentCenter: hit,
-          bodyChildren: document.body.childElementCount,
-        };
-        lastDomDiag = { tag, at: new Date().toISOString(), ...snap, dump: dumpDom() };
-        reportClientError("dom-diag:" + tag, { message: JSON.stringify(lastDomDiag) });
-      } catch (e) {
-        /* 诊断失败不能影响功能 */
-      }
-    }
-
     /**
      * 最近一次错误 / 最近一次 DOM 快照。
      *
@@ -91,7 +27,6 @@
      * 上一轮排查就是这么白跑的。
      */
     let lastClientError = null;
-    let lastDomDiag = null;
     /**
      * 上报环。
      *
@@ -108,158 +43,6 @@
      * 某一瞬间的结果，抓不到"什么时候没的"。每 2 秒记一行，一次上报就带整条，
      * 从时间线上能直接看出它是从没出现过、还是出现过又消失了。
      */
-    const presTimeline = [];
-    const presTimers = [];
-
-    /**
-     * 穷举式 DOM 倒树。
-     *
-     * 上一轮只查固定选择器，结果是「组件被调用过（子页签点击生效）但
-     * .nm-page-root / .nm-panel / .nm-tabs 全查不到」—— 固定选择器问不出来
-     * "那它到底在哪"，所以这次把文档里所有 nm-* 元素连同它们的祖先链一起倒出来。
-     */
-    function dumpDom() {
-      const out = { nm: [], body: [], views: [], shadowHosts: [], roots: [] };
-      try {
-        /**
-         * 递归收集所有查询根：document 本身，以及每一个带 shadowRoot 的元素。
-         * Shadow DOM 会挡住 document.querySelector（不穿透），也会挡住注入到
-         * document.head 的样式 —— 这两件事正好能解释"点得到却查不到"。
-         */
-        const roots = [document];
-        const walkShadow = (node) => {
-          if (!node || node.nodeType !== 1) return;
-          if (node.shadowRoot) {
-            roots.push(node.shadowRoot);
-            out.shadowHosts.push({
-              t: (node.tagName || "?").toLowerCase(),
-              id: node.id || "",
-              c: String(node.className || "").slice(0, 50),
-              kids: node.shadowRoot.childElementCount,
-            });
-          }
-          for (const c of node.children || []) walkShadow(c);
-        };
-        walkShadow(document.documentElement);
-        walkShadow(document.body);
-        out.roots = roots.map((r) => (r === document ? "#document" : "shadow:" + String((r.host && r.host.tagName) || "?").toLowerCase() + "." + String((r.host && r.host.className) || "").split(" ")[0]));
-
-        // 1) 在所有根里找 nm-* 元素
-        const all = [];
-        for (const root of roots) {
-          for (const el of root.querySelectorAll('[class*="nm-"]')) all.push({ el, root });
-        }
-        let i = 0;
-        for (const { el, root } of all) {
-          if (i++ > 80) break;
-          const r = el.getBoundingClientRect();
-          const cs = getComputedStyle(el);
-          // 祖先链前 4 层，用来判断它挂在谁下面
-          const chain = [];
-          let p = el.parentElement;
-          let d = 0;
-          while (p && d++ < 4) {
-            chain.push((p.tagName || "?").toLowerCase() + "." + String(p.className || "").split(" ")[0]);
-            p = p.parentElement;
-          }
-          out.nm.push({
-            inShadow: root !== document,
-            c: String(el.className || "").slice(0, 60),
-            kids: el.childElementCount,
-            w: Math.round(r.width),
-            h: Math.round(r.height),
-            top: Math.round(r.top),
-            disp: cs.display,
-            vis: cs.visibility,
-            op: cs.opacity,
-            chain: chain.join(" < "),
-          });
-        }
-        // 2) body 直接子节点
-        for (const el of document.body.children) {
-          const r = el.getBoundingClientRect();
-          out.body.push({
-            t: (el.tagName || "?").toLowerCase(),
-            id: el.id || "",
-            c: String(el.className || "").slice(0, 40),
-            kids: el.childElementCount,
-            w: Math.round(r.width),
-            h: Math.round(r.height),
-          });
-        }
-        // 3) 带 role=tabpanel / 明显是"视图容器"的节点
-        for (const el of document.querySelectorAll('[role="tabpanel"], [data-view], main')) {
-          const r = el.getBoundingClientRect();
-          out.views.push({
-            t: (el.tagName || "?").toLowerCase(),
-            id: el.id || "",
-            c: String(el.className || "").slice(0, 50),
-            kids: el.childElementCount,
-            html: String(el.innerHTML || "").length,
-            w: Math.round(r.width),
-            h: Math.round(r.height),
-          });
-        }
-      } catch (e) {
-        out.err = String((e && e.message) || e);
-      }
-      return out;
-    }
-    function samplePresence() {
-      try {
-        const q = (sel) => {
-          const el = document.querySelector(sel);
-          if (!el) return 0;
-          const r = el.getBoundingClientRect();
-          return Math.round(r.width) + "x" + Math.round(r.height) + "@" + Math.round(r.top);
-        };
-        const entry = {
-          t: Math.round(performance.now()),
-          root: q(".nm-page-root"),
-          panel: q(".nm-panel-page"),
-          tabs: document.querySelectorAll(".nm-tabs").length,
-          view: store.view,
-        };
-        presTimeline.push(entry);
-        if (presTimeline.length > 40) presTimeline.shift();
-      } catch (e) {
-        /* 采样失败不影响功能 */
-      }
-    }
-
-    /**
-     * 诊断主页面底部那个输入框（DSH 自己的组件，我们够不到它的类名）。
-     * 报回它的实际背景色、backdrop-filter、尺寸，以及它在用什么令牌 ——
-     * 这样"为什么没磨上"就不用猜了。
-     */
-    function reportInputDock(tag) {
-      try {
-        // 用 textarea 反查：输入框一定是它的祖先里最外那层"卡片"
-        const ta = document.querySelector("textarea");
-        if (!ta) return;
-        const chain = [];
-        let el = ta;
-        for (let i = 0; i < 6 && el; i++) {
-          const cs = getComputedStyle(el);
-          const r = el.getBoundingClientRect();
-          chain.push({
-            tag: (el.tagName || "?").toLowerCase(),
-            cls: String(el.className || "").slice(0, 70),
-            w: Math.round(r.width),
-            h: Math.round(r.height),
-            bg: cs.backgroundColor,
-            filter: cs.backdropFilter || cs.webkitBackdropFilter || "none",
-            // 它自己在用哪些我们改写过或可能磨砂的令牌
-            varBgBase: cs.getPropertyValue("--dsw-alias-bg-base").trim(),
-            varBgSecondary: cs.getPropertyValue("--dsw-alias-bg-secondary").trim(),
-          });
-          el = el.parentElement;
-        }
-        reportClientError("input-dock:" + tag, { message: JSON.stringify({ tag, chain }) });
-      } catch (e) {
-        /* 诊断失败不影响功能 */
-      }
-    }
 
     function reportClientError(where, err) {
       try {
@@ -369,21 +152,57 @@
       diag: null,
     };
     let version = 0;
+    /**
+     * 时间单独一条订阅线。
+     *
+     * 为什么拆：store.time 在 timeupdate 里每秒变 4~5 次，而原来只有一个版本号 ——
+     * 于是每刷新一次时间，**19 个 useStore 组件全部重渲染**，包括 218 行的设置页、
+     * 145 行的侧栏卡片这些跟时间毫无关系的。实测真正需要时间的只有 3 个：
+     * LyricsBox（歌词高亮）、PlayerView（进度+歌词）、SidebarPlayer（进度+单行歌词）。
+     * 它们改用 useClock()，其余 16 个不再被时间拖着走。
+     */
+    let clock = 0;
     const listeners = new Set();
+    const clockListeners = new Set();
+    /** 真正的状态变化：两条线都推进。 */
     function emit() {
       version += 1;
+      clock += 1;
       for (const listener of [...listeners]) listener();
+      for (const listener of [...clockListeners]) listener();
+    }
+    /** 只推进时间：不惊动订阅 useStore 的组件。 */
+    function emitClock() {
+      clock += 1;
+      for (const listener of [...clockListeners]) listener();
     }
     function subscribe(cb) {
       listeners.add(cb);
       return () => listeners.delete(cb);
     }
+    function subscribeClock(cb) {
+      clockListeners.add(cb);
+      return () => clockListeners.delete(cb);
+    }
     function useStore() {
       return useSyncExternalStore(subscribe, () => version);
+    }
+    /** 需要显示时间/进度的组件用这个（与 useStore 可同时用）。 */
+    function useClock() {
+      return useSyncExternalStore(subscribeClock, () => clock);
     }
     let noticeTimer = null;
     /** 皮肤输入的订阅取消函数（teardown 里用）。 */
     let skinUnsub = null;
+    /**
+     * 皮肤还要单独订阅时间线。
+     *
+     * 为什么：pushSkin 要把"当前歌词行"推给背景层，而歌词行是靠 store.time 算的。
+     * 时间走的是 emitClock（轻量线，不惊动 useStore 的那些组件），如果 pushSkin
+     * 只挂在 version 线上，timeupdate 就永远不会推给背景 —— 表现是**背景歌词卡住不动**。
+     * 这一步是自我审查时抓出来的：性能优化把背景的输入一起掐了。
+     */
+    let skinClockUnsub = null;
     function setNotice(text) {
       store.notice = text;
       emit();
@@ -475,7 +294,8 @@
         const t = Math.floor(audio.currentTime);
         if (t !== store.time) {
           store.time = t;
-          emit();
+          // 走轻量线：时间变了不等于别的状态变了
+          emitClock();
           if (Math.abs(t - lastSavedPos) >= 5) saveResume(t);
         }
       });
@@ -486,13 +306,11 @@
       audio.addEventListener("play", () => {
         store.playing = true;
         emit();
-        reportSoon();
       });
       audio.addEventListener("pause", () => {
         store.playing = false;
         saveResume();
         emit();
-        reportSoon();
       });
       audio.addEventListener("ended", () => onEnded());
       audio.addEventListener("error", () => {
@@ -736,7 +554,6 @@
       store.resumeAt = 0;
       store.resumeAtSong = null;
       emit();
-      reportSoon();
       pushHistory(song);
       saveResume(0);
       loadLyric(song.id);
@@ -957,7 +774,6 @@
       store.mode = mode;
       saveResume();
       emit();
-      reportSoon();
       if (persist) saveSettings({ playMode: mode });
     }
 
@@ -1347,14 +1163,6 @@
     }
 
     let reportTimer = null;
-    function reportSoon() {
-      if (reportTimer) return;
-      reportTimer = setTimeout(() => {
-        reportTimer = null;
-        report();
-      }, 400);
-    }
-
     async function report() {
       try {
         await hostPost("/state", {
@@ -1404,31 +1212,6 @@
     function IconVolume(props) {
       const p = props || {};
       return el("svg", { ...svgProps(p.size || 14), fill: "currentColor", stroke: "none" }, el("path", { d: "M3 9v6h4l5 4V5L7 9H3z" }), el("path", { d: "M16 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12" }));
-    }
-    function IconExpand(props) {
-      const p = props || {};
-      return el("svg", { ...svgProps(p.size || 14) }, el("path", { d: "M12 19V5M5 12l7-7 7 7" }));
-    }
-    function IconClock(props) {
-      const p = props || {};
-      return el("svg", { ...svgProps(p.size || 14) }, el("circle", { cx: 12, cy: 12, r: 9 }), el("path", { d: "M12 7v5l3 3" }));
-    }
-    function IconList(props) {
-      const p = props || {};
-      return el("svg", { ...svgProps(p.size || 14) }, el("path", { d: "M8 6h13M8 12h13M8 18h13" }), el("path", { d: "M3.5 6h.01M3.5 12h.01M3.5 18h.01" }));
-    }
-    function IconStar(props) {
-      const p = props || {};
-      return el("svg", { ...svgProps(p.size || 14) }, el("path", { d: "M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z" }));
-    }
-    function IconGear(props) {
-      const p = props || {};
-      return el(
-        "svg",
-        { ...svgProps(p.size || 14) },
-        el("circle", { cx: 12, cy: 12, r: 3 }),
-        el("path", { d: "M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3h.1a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5h.1a1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" })
-      );
     }
     function ModeIcon(props) {
       const p = props || {};
@@ -2056,6 +1839,7 @@
 
     function LyricsBox() {
       useStore();
+      useClock(); // 需要时间/进度
       const boxRef = useRef(null);
       const lines = store.lyrics ? store.lyrics.lines : [];
       let current = -1;
@@ -2092,6 +1876,7 @@
 
     function PlayerBar() {
       useStore();
+      useClock(); // 需要时间/进度
       const song = store.song;
       const dur = audio && audio.duration ? audio.duration : song && song.duration ? song.duration : 0;
       const cur = audio ? audio.currentTime : 0;
@@ -2129,15 +1914,15 @@
     function panelTabs() {
       const mods = store.modules || {};
       const tabs = [];
-      if (mods.daily !== false) tabs.push({ id: "daily", label: "推荐", icon: "star" });
-      if (mods.playlist !== false) tabs.push({ id: "playlist", label: "歌单", icon: "list" });
-      if (mods.fm !== false) tabs.push({ id: "fm", label: "私人FM", icon: "star" });
-      tabs.push({ id: "search", label: "搜索", icon: "search" });
-      tabs.push({ id: "queue", label: "队列", icon: "list" });
-      if (mods.history !== false) tabs.push({ id: "history", label: "历史", icon: "clock" });
+      if (mods.daily !== false) tabs.push({ id: "daily", label: "推荐" });
+      if (mods.playlist !== false) tabs.push({ id: "playlist", label: "歌单" });
+      if (mods.fm !== false) tabs.push({ id: "fm", label: "私人FM" });
+      tabs.push({ id: "search", label: "搜索" });
+      tabs.push({ id: "queue", label: "队列" });
+      if (mods.history !== false) tabs.push({ id: "history", label: "历史" });
       // 「播放器」单独立一个子页签，位置按要求排在「历史」与「设置」之间
-      tabs.push({ id: "player", label: "播放器", icon: "star" });
-      tabs.push({ id: "settings", label: "设置", icon: "gear" });
+      tabs.push({ id: "player", label: "播放器" });
+      tabs.push({ id: "settings", label: "设置" });
       return tabs;
     }
 
@@ -2164,6 +1949,7 @@
      */
     function PlayerView() {
       useStore();
+      useClock(); // 需要时间/进度
       const song = store.song;
       if (!song) return el("div", { className: "nm-hint" }, "还没有播放中的歌曲 —— 去「推荐」或「歌单」里点一首吧");
       const lines = store.lyrics ? store.lyrics.lines : [];
@@ -2380,6 +2166,7 @@
 
     function SidebarPlayer() {
       useStore();
+      useClock(); // 需要时间/进度
       const song = store.song;
       const dur = audio && audio.duration ? audio.duration : song && song.duration ? song.duration : 0;
       const cur = audio ? audio.currentTime : 0;
@@ -2396,64 +2183,6 @@
         emit();
         activateMusicView();
       };
-      // 「我喜欢的音乐」曲目列表由 refreshLogin() 统一加载（所有登录路径都汇聚在那里），
-      // 这里不再重复加载——爱心状态只应该有一个来源。
-      // 把侧栏卡片的实测尺寸回传给宿主（GET /plugin/netease-music/api?method=/diag 可读回）。
-      // 目的：不依赖截图量像素就能拿到两张卡片的精确尺寸——之前连续几轮返工就是因为
-      // 只能靠肉眼看截图估高度。
-      useEffect(() => {
-        const timer = setTimeout(() => {
-          try {
-            const box = (node) => {
-              if (!node) return null;
-              const r = node.getBoundingClientRect();
-              const cs = getComputedStyle(node);
-              return {
-                cls: String(node.className || "").slice(0, 34),
-                w: Math.round(r.width),
-                h: Math.round(r.height),
-                pad: cs.padding,
-                radius: cs.borderRadius,
-                flex: cs.flex,
-              };
-            };
-            const wrap = document.querySelector(".nm-side-wrap");
-            let container = null;
-            let node = wrap ? wrap.parentElement : null;
-            while (node && node !== document.body) {
-              const cs = getComputedStyle(node);
-              if (cs.display !== "contents" && cs.display.indexOf("flex") >= 0) {
-                container = node;
-                break;
-              }
-              node = node.parentElement;
-            }
-            const ccs = container ? getComputedStyle(container) : null;
-            const report = {
-              at: new Date().toISOString(),
-              // ★ 顺风车：这两个槽是本轮排查的关键，不能让它被这条遥测盖掉
-              lastClientError,
-              clientErrors,
-              lastDomDiag,
-              presTimeline,
-              card: box(document.querySelector(".nm-side")),
-              wrap: box(wrap),
-              cover: box(document.querySelector(".nm-side-cover .nm-cover")),
-              usageCard: box(document.querySelector("[class*='triggerWrap']")),
-              usageInner: box(document.querySelector("[class*='_trigger']")),
-              container: box(container),
-              containerLayout: ccs ? ccs.display + " / " + ccs.flexDirection + " / wrap=" + ccs.flexWrap : null,
-              siblings: container
-                ? Array.prototype.slice.call(container.children).map((k) => box(k))
-                : [],
-            };
-            api("/diag", { data: JSON.stringify(report) }).catch(() => {});
-          } catch (err) {
-            /* 调试通道失败不影响功能 */
-          }
-        }, 2500);
-        return () => clearTimeout(timer);
-      }, []);
       // 让两张卡片上下堆叠。
       //
       // 自检实测：sidebar.footer.action 实际挂在 `_2H3hWl_footerActions` 这个
@@ -3047,6 +2776,10 @@ div[role=presentation]:has(>div[aria-hidden=true]:first-child)>div[aria-hidden=t
         skinUnsub();
         skinUnsub = null;
       }
+      if (skinClockUnsub) {
+        skinClockUnsub();
+        skinClockUnsub = null;
+      }
       DshSkin.disposeStyle();
     }
 
@@ -3090,6 +2823,7 @@ div[role=presentation]:has(>div[aria-hidden=true]:first-child)>div[aria-hidden=t
       };
       pushSkin();
       skinUnsub = subscribe(pushSkin);
+      skinClockUnsub = subscribeClock(pushSkin);
       const slots = ctx.slots;
       init();
 
@@ -3121,16 +2855,9 @@ div[role=presentation]:has(>div[aria-hidden=true]:first-child)>div[aria-hidden=t
         )
       );
       // 排两次：一次同步（刚注册完）、一次延迟 2.5s（等 React 提交完 + 数据拉回来）
-      reportDomDiag("sync");
-      // 输入框的诊断多采几次：它是 DSH 的组件，挂载时机比我们的晚
-      [2000, 6000, 12000].forEach((ms) => setTimeout(() => reportInputDock("t+" + ms + "ms"), ms));
-      // 每 2 秒采一次、持续 40 秒：间歇性故障要靠时间线抓，单点快照抓不到。
-      // 这段时间里请把「网易云音乐」页签点开，否则采到的都是"没激活所以没渲染"。
-      samplePresence();
-      // 一直采：不再依赖用户恰好在某个时间窗口内操作
-      const presTimer = setInterval(samplePresence, 2000);
-      presTimers.push(presTimer);
-      [1000, 3000, 8000, 20000, 40000, 90000].forEach((ms) => setTimeout(() => reportDomDiag("t+" + ms + "ms"), ms));
+      // 这里曾挂着一整套一次性 DOM 诊断（页签容器存在性时间线、输入框祖先链倒树），
+      // 用来定位"组件没抛错但界面空白""输入框没磨砂"那两次故障。故障都已定位并修掉，
+      // 探针撤掉；报错能力（reportClientError + 错误边界）保留。
       slots.inject("settings.section", () =>
         slots.register({ name: "settings.section", id: "netease-music-settings", order: 40, label: () => "网易云音乐" }, guard(SettingsView))
       );
