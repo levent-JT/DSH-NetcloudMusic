@@ -230,6 +230,24 @@ try {
   ok(click(playAll), '点「播放全部」（这条路径不传 source）')
   await flush(); render()
 
+  // ── E2) ★ 「我的歌单」也必须自动加载 ★ ────────────────────────────
+  // 这条上一轮失败过、功能被回退过。原因：所有加载函数共用 store.loadingView 一个闸，
+  // 切页签时"每日推荐"的加载可能还占着闸。修法是被挡住时**自己定时再来**（400ms×最多 25 次），
+  // 而不是指望 effect 重跑 —— 占闸的加载要是卡住不结束，effect 就再也不会触发。
+  // 所以这里必须**等真实时间**：flush() 只推微任务，等不到 400ms 的定时器。
+  render()
+  ok(click(findByText('歌单')), '切到「歌单」子页签')
+  await new Promise((r) => setTimeout(r, 700))
+  await flush(); render()
+  await new Promise((r) => setTimeout(r, 700))
+  await flush(); render()
+  const oldPlaylistHint = seenNodes.find((n) => n.props && typeof n.props.children === 'string'
+    && n.props.children.indexOf('点击加载我的歌单') >= 0)
+  ok(!oldPlaylistHint, '★ 「点击加载我的歌单」入口已消失（改成自动加载）')
+  const listCall = calls.find((u) => u.indexOf(encodeURIComponent('/user/playlist')) >= 0)
+  ok(!!listCall, '★ 进歌单页签就自动发起了 /user/playlist 请求',
+    listCall ? decodeURIComponent(listCall).slice(0, 90)
+      : '实际调用: ' + calls.map((u) => decodeURIComponent(u).replace(/^.*method=/, '')).join('  '))
   ok(click(findByText('播放器')), '切回「播放器」子页签')
   await flush(); render()
   ok(modeIsHeartbeat(), '★★ 从别的来源开始播放后，心动模式仍然是当前模式（这就是旧版的 bug）', modeTitle())

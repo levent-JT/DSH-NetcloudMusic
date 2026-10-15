@@ -950,16 +950,34 @@
     function hasTriedAutoLoad(view) {
       return autoLoadTried.has(autoLoadKey(view));
     }
+    const autoLoadRetry = new Map(); // key -> 已重试次数
+    const AUTO_RETRY_MS = 400;
+    const AUTO_RETRY_MAX = 25; // 约 10 秒还没排上就放弃，退回手动"点击加载"
+
+    /**
+     * 自动加载：同一把 key 只尝试一次，失败不重试。
+     *
+     * **被闸挡住时要有界重试，不能只等 effect 重跑。**
+     * 所有加载函数共用 store.loadingView 这一个闸。上次我的写法是"忙就直接返回、
+     * 指望 loadingView 变了 effect 会再进来"—— 但如果那个占闸的加载一直不结束，
+     * effect 就永远不会再触发，等于死等（表现就是界面永远停在"正在加载…"）。
+     * 现在自己定个闹钟回来，最多 AUTO_RETRY_MAX 次。
+     */
     function autoLoadOnce(view, fn) {
       const key = autoLoadKey(view);
       if (autoLoadTried.has(key)) return;
-      // ★ 有别的加载在跑时**不记账**直接返回。
-      // 这里的坑：所有加载函数共用 store.loadingView 这一个闸，
-      // 如果这时记账，就等于宣布"这个视图已经试过"，而实际一个请求都没发出去 ——
-      // 之后永远不会再试，界面永远停在"正在加载…"。
-      // 不记账 + 把 store.loadingView 放进 effect 依赖，等它空了自然会再进来。
-      if (store.loadingView) return;
+      if (store.loadingView) {
+        const n = (autoLoadRetry.get(key) || 0) + 1;
+        if (n > AUTO_RETRY_MAX) {
+          autoLoadRetry.delete(key);
+          return; // 放弃自动，界面上留着"点击加载"
+        }
+        autoLoadRetry.set(key, n);
+        setTimeout(() => autoLoadOnce(view, fn), AUTO_RETRY_MS);
+        return;
+      }
       autoLoadTried.add(key); // 同步标记，避免同一帧被并发触发两次
+      autoLoadRetry.delete(key);
       Promise.resolve()
         .then(fn)
         .catch(() => {
@@ -1692,9 +1710,12 @@
     function PlaylistView() {
       useStore();
       const open = store.playlistOpen;
-      // 注意：这里**没有**自动加载 —— 歌单的自动拉取有一个时序问题没解决
-      // （上一个加载还占着 store.loadingView 时会被闸掉），本轮先保留点击加载。
-      // 每日推荐的自动加载是已验证通过的，见 DailyView。
+      const loadingPl = store.loadingView === "playlists";
+      // 自动加载的 effect 必须放在早返之前 —— hooks 不能有条件
+      const pendingPl = store.login && store.playlists === null && !hasTriedAutoLoad("playlists");
+      useEffect(() => {
+        if (store.login && store.playlists === null) autoLoadOnce("playlists", loadUserPlaylists);
+      }, [store.login, store.playlists]);
       if (open) {
         // 队列来源只是透传给 playSongs 记账，**不影响心动模式能否开启** ——
         // 心动只要求"已登录 + 有红心歌单 id"，种子歌单永远是「我喜欢的音乐」，
@@ -1715,13 +1736,14 @@
         "div",
         { className: "nm-view" },
         el(LoginGate, {},
-          store.loadingView === "playlists"
+          loadingPl || pendingPl
             ? el("div", { className: "nm-hint" }, "正在加载歌单…")
             : store.playlists
               ? store.playlists.length
                 ? el("div", { className: "nm-playlist-grid" }, store.playlists.map((pl, i) => el(PlaylistCard, { key: pl.id, index: i, playlist: pl, onOpen: () => openPlaylist(pl.id, false) })))
                 : el("div", { className: "nm-hint" }, "没有歌单")
-              : el("div", { className: "nm-hint nm-clickable", onClick: () => loadUserPlaylists() }, "点击加载我的歌单"))
+              // 走到这里只可能是"自动加载试过但失败了"
+              : el("div", { className: "nm-hint nm-clickable", onClick: () => loadUserPlaylists() }, "歌单加载失败，点击重试"))
       );
     }
 
@@ -1854,6 +1876,17 @@
             el("div", { className: "nm-mode-picker" },
               ["sequence", "loop", "single", "shuffle"].map((m) =>
                 Btn({ key: m, className: "nm-mode-btn", active: store.mode === m, onClick: () => setMode(m, true), title: MODE_LABELS[m], children: MODE_LABELS[m] }))))),
+        el("div", { className: "nm-settings-group" },
+          el("div", { className: "nm-settings-title" }, "DSH 皮肤"),
+          el(ToggleRow, {
+            label: "启用（半透明面板 / 磨砂 / 文字提亮）",
+            checked: amb.enabled !== false,
+            onChange: (v) => setAmb({ enabled: v }),
+          }),
+          el("div", { className: "nm-settings-hint" },
+            "关掉之后 DSH 界面恢复原样：面板不透明、没有磨砂、文字用系统原色。",
+            "听歌功能完全不受影响——播放、歌单、搜索、心动模式、音质、缓存都照常。",
+            "播放页自己的背景样式由下面「播放页背景」单独控制。")),
         el("div", { className: "nm-settings-group" },
           el("div", { className: "nm-settings-title" }, "播放页背景"),
           el("div", { className: "nm-settings-row" },
@@ -2615,14 +2648,9 @@
 .nm-frost{
   backdrop-filter:blur(var(--nm-blur,18px)) saturate(150%);
   -webkit-backdrop-filter:blur(var(--nm-blur,18px)) saturate(150%)}
-/* 弹窗的整屏遮罩层 —— 这一条才是"弹层明显更高"的观感来源。
-   做法照抄 @kenz1117/dsh-ui-usage-billing（已在本机跑通、效果就是用户想要的那种）：
-   DSH 的弹窗结构是 div[role=presentation] > div[aria-hidden=true]，遮罩是它的首个子节点。
-   磨遮罩 = 背后的页面整体糊掉 + 弹窗自己跳出来，比逐个面板加模糊干净得多。
-   注意用的是 :has()，Chromium 105+ 支持（DSH Desktop 的运行时满足）。 */
-div[role=presentation]:has(>div[aria-hidden=true]:first-child)>div[aria-hidden=true]:first-child{
-  backdrop-filter:blur(10px) saturate(1.25);
-  -webkit-backdrop-filter:blur(10px) saturate(1.25)}
+/* 注意：弹窗遮罩那条 :has() 规则**不在这里** —— 它不需要我们的类名就能命中，
+   放在静态 CSS 里会绕过"DSH 皮肤"总开关。它已挪进 DshSkin 的 DARK_SURFACE_CSS
+   （那份由 applySkin 注入、clearSkin 摘除，跟着开关走）。 */
 /* 主色光晕：screen 让它在压暗层之上"发光"而不是盖一层色块，
    这正是"背景色随封面变化"的来源（网易云的核心观感）。 */
 .nm-amb-tint{position:absolute;inset:0;mix-blend-mode:screen}

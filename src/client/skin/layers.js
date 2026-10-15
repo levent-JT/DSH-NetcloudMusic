@@ -197,7 +197,16 @@ const SkinLayers = (() => {
       const cfg = s.config || {};
       const mode = cfg.mode || "cover-lyrics";
       const cover = s.cover;
-      const enabled = mode !== "off" && !!cover;
+      /**
+       * 总开关。关掉之后这一整条链都停：
+       *   令牌还原（面板不透明）、磨砂摘掉、文字回原色、压暗规则撤掉、
+       *   3 秒兜底轮询不再启动、背景图层不渲染。
+       * 之所以一行就够：皮肤的应用只有下面这个 useEffect 里两处 applySkin，
+       * 其余全挂在 enabled 的早退与 useEffect 的清理上。
+       * **听歌功能完全不受影响。**
+       */
+      const skinOn = cfg.enabled !== false;
+      const enabled = skinOn && mode !== "off" && !!cover;
       const alpha = typeof cfg.panelAlpha === "number" ? cfg.panelAlpha : 0.45;
       // hooks 必须在早退出之前无条件调用；取不到统计值时下面的自适应按中间亮度兜底
       const stats = SkinPalette.useCoverStats(enabled ? cover : "");
@@ -217,7 +226,7 @@ const SkinLayers = (() => {
           clearInterval(id);
           DshSkin.clearSkin();
         };
-      }, [enabled, alpha, cfg.frost]);
+      }, [enabled, alpha, cfg.frost, skinOn]);
 
       if (!enabled) return null;
 

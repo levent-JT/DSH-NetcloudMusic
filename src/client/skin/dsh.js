@@ -51,6 +51,12 @@ const DshSkin = (() => {
      * 唯一没覆盖的是「加载更早」那个按钮：它没有类名，属性选择器选不中。
      */
     const DARK_SURFACE_CSS = [
+      // 弹窗的整屏遮罩 —— 这一条才是"弹层明显更高"的观感来源，做法照抄
+      // @kenz1117/dsh-ui-usage-billing：DSH 弹窗结构是 div[role=presentation] >
+      // div[aria-hidden=true]，遮罩是它的首个子元素。磨遮罩 = 背后整体糊掉 + 弹窗跳出来。
+      // **它用的是 :has()，不需要我们的类名，所以必须放在这份"跟着开关走"的样式里**，
+      // 留在静态 CSS 里的话，关掉皮肤它照样生效。
+      'div[role="presentation"]:has(>div[aria-hidden="true"]:first-child)>div[aria-hidden="true"]:first-child{backdrop-filter:blur(10px) saturate(1.25);-webkit-backdrop-filter:blur(10px) saturate(1.25)}',
       '[class*="_banner_7gxqk"], [class*="_plain_7gxqk"]{background-color:transparent!important}',
       '[class*="_block_7gxqk"], [class*="code-block"]{background-color:rgba(18,20,26,.72)!important;border-color:rgba(255,255,255,.10)!important}',
       "pre,code{background-color:transparent!important}",
