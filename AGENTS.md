@@ -475,6 +475,51 @@ React 组件抛错会**卸载整个 root**，表现是"一片空白、什么都�
 
 ---
 
+### 上架到 DSH 插件市场（2026-10-15 起，未完成）
+
+**现状：仓库这一侧全部就绪，剩下三步只有账号主人能做。**
+用户的态度是"你自己看着操作，我忙着呢，反正免费的插件，爱用不用"——
+**所以别催，也别因为没做完就焦虑：不做这三步完全不影响他自己用。**
+规范原话：「发不发布都不影响收录，插件照样能从 GitHub 安装」。
+
+**已做（都提交推送了）**
+- `package.json`：去掉 `private`；补 `repository`/`homepage`/`bugs`/`keywords`/`author`；
+  加 `engines.dsh`。`dsh.bundle.patch` + `dsh.client` 本来就有。
+- `screenshots.json`（package.json 旁边）：声明 4 张截图，相对路径，1-8 张。
+- `README.md` 加「截图」一节；图片在 `docs/screenshots/`（不进 npm 包）。
+- `npm pack` 干跑：9 个文件 145 KB，干净。
+- 条目 YAML 写在仓库外的 `临时任务/nm-market-entry.yml`（不是本仓库的文件）。
+
+**剩下三步（都需要账号，我做不到）**
+```powershell
+cd C:\Users\levent.li\Desktop\临时任务\dsh-netease-music
+npm login   --registry=https://registry.npmjs.org/
+npm publish --registry=https://registry.npmjs.org/
+```
+- **两个 --registry 都必须带**：这台机器的 npm 指向 `registry.npmmirror.com`（淘宝镜像），
+  **镜像不接受发布**，不带就失败。
+- 给 https://github.com/levent-JT/DSH-NetcloudMusic/settings 加 topic **`dsh-plugin`**（CI 硬查）。
+- fork `awesome-dsh-plugin/awesome-dsh-plugin`，新建**一个文件**
+  `data/plugins/levent-JT__DSH-NetcloudMusic.yml`，内容复制上面那份，开 PR。
+
+**市场机制（查过一次就别再查）**
+- 市场本体 `dshmarket` 只是客户端；列表来自精选仓库 `awesome-dsh-plugin/awesome-dsh-plugin`，
+  CI 每天刷成 `https://awesome-dsh-plugin.com/plugins.json`（4671 条）。
+- **一个插件一个 YAML 文件**（`data/plugins/<owner>__<repo>.yml`），两个 README 由脚本生成，
+  **严禁手工编辑**。这正是它不冲突的原因：条目文件永不相撞，README 行才相撞。
+- 条目字段：`url`（必须与仓库一字不差）/ `name`（owner/repo）/ `category` / `description.en`
+  （必填、句号结尾、**不含营销词、会被拿去和代码逐条核对**）/ 可选 `zh` / 可选 `tarball`。
+- **禁止手写 `npm:` 字段——会被校验直接拒绝。** npm 映射从 registry 自动采集，
+  前提是包的 `repository` 字段指回收录的那个仓库。
+- 分类：播放器类都在 **`ui`**（816 条）。**`theme` 是纯主题，会自动进市场的主题 Tab**，不是我们。
+- 硬要求四条：`dsh.bundle` manifest（**规范点名"最常见拒因是只声明 `dsh.client`"**）、
+  仓库根有 `cordis.patch.yml`、仓库满 1 天、有真实代码。**我们四条都过。**
+- 截图走自己仓库的 `screenshots.json`（1-8 张、相对路径、不能 `/` 开头或含 `..`）。
+  不声明也行，市场会从 README 抽。
+
+**克隆前先看一眼的同类插件**：ncm-player（3★ 浮窗）、dsh-music-player（17★ 本地音乐+朗读）、
+SinglePlayer（2★ AI 聚合）、dsh-MusicPlayer（4★ 悬浮窗）。我们的差异是整页页签 + 沉浸式
+背景皮肤 + 心动模式（2018 官方语义）+ 音质阶梯 + 侧栏播放器，以及唯一的「DSH 皮肤总开关」。
 ## 5. 构建与验证的工具链（照着用）
 
 ```powershell
