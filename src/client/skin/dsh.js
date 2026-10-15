@@ -231,17 +231,26 @@ const DshSkin = (() => {
       return true; // 交给 frostMatches 的尺寸闸门判断
     }
 
-    function frostMatches(el) {
-      if (!el || el.nodeType !== 1 || !el.classList) return false;
-      if (el.classList.contains(FROST_CLASS)) return false;
+    /**
+     * 判定一个元素该不该磨砂，**并说明拒绝的理由**。
+     *
+     * 为什么要有理由：原来只有 true/false，出问题（比如"输入框没磨砂"）时
+     * 只能猜是四道闸里的哪一道拦的 —— 猜了两轮都没猜中。
+     * 现在返回空串表示通过，否则返回具体原因，诊断可以直接把它报回来。
+     */
+    function frostReason(el) {
+      if (!el || el.nodeType !== 1 || !el.classList) return 'not-element';
+      if (el.classList.contains(FROST_CLASS)) return 'already-frosted';
       // 别动我们自己的背景层和插件界面
-      if (backgroundLayerEl && (el === backgroundLayerEl || backgroundLayerEl.contains(el))) return false;
-      if (el.closest && el.closest("[data-plugin^='dsh-netease']")) return false;
-      if (frostMode === 'off') return false;
+      if (backgroundLayerEl && (el === backgroundLayerEl || backgroundLayerEl.contains(el))) return 'our-bg-layer';
+      if (el.closest && el.closest("[data-plugin^='dsh-netease']")) return 'our-plugin';
+      if (frostMode === 'off') return 'mode-off';
       const r = el.getBoundingClientRect();
-      if (r.width < 48 || r.height < 28) return false; // 太小不值得磨砂，省掉大量无用合成层
+      if (r.width < 48 || r.height < 28) return 'too-small'; // 太小不值得磨砂，省掉大量无用合成层
       const vw = window.innerWidth || 1;
       const vh = window.innerHeight || 1;
+      let tall = false;
+      let big = false;
       if (frostMode === 'layout') {
         // 判据：**常驻版式区域不磨，工具面/浮层才磨**。
         //
@@ -250,7 +259,7 @@ const DshSkin = (() => {
         // 又不依赖令牌名（令牌名是混用的 —— bg-layer-* 主对话区和浮层都在用，
         // 照名字放行会把主对话区也磨了），也不依赖 DOM 归属（右侧边栏同样在布局树里，
         // 按"在不在 #root 里"会把它一起排除，这正是上一版排太狠的原因）。
-        if (r.height >= vh * 0.88) return false;
+        if (r.height >= vh * 0.88) { tall = true; }
         // 面积闸（第二道）：只拦**整页级容器**。backdrop-filter 会把元素变成包含块，
         // 里面的 position:fixed 后代会被重新锚定到它身上（实测把左侧栏锚飞过）。
         //
@@ -259,10 +268,49 @@ const DshSkin = (() => {
         // "只磨了抽屉里的组件、抽屉本身没磨"。两闸职责要分清：
         //   高度闸 >=88% 视口高 → 常驻版式区域（左侧栏、主对话区）；
         //   面积闸 >=85% 视口面积 → 整页级容器（兜底，防锚飞）。
-        if (r.width * r.height > vw * vh * 0.85) return false;
+        if (r.width * r.height > vw * vh * 0.85) { big = true; }
       }
-      const key = rgbaKey(getComputedStyle(el).backgroundColor);
-      return !!key && injectedKeys.has(key);
+      if (tall && big) return 'page-container';
+      if (tall) return 'full-height-region';
+      if (big) return 'full-page-area';
+      const cs2 = getComputedStyle(el);
+      const key = rgbaKey(cs2.backgroundColor);
+      if (!key) return 'bg-transparent-or-unparsable';
+      if (!injectedKeys.has(key)) return 'bg-not-a-rewritten-token';
+      return '';
+    }
+
+    /** 兼容旧签名：只要理由为空串就是该磨。 */
+    function frostMatches(el) {
+      return frostReason(el) === '';
+    }
+
+    /**
+     * 诊断：从某元素沿祖先链逐层给出"该不该磨 + 为什么 + 关键样式"。
+     * 只读，不做任何写操作。
+     */
+    function explainFrost(el, levels) {
+      const out = [];
+      let node = el;
+      let i = 0;
+      while (node && node !== document.body && i++ < (levels || 6)) {
+        const cs = getComputedStyle(node);
+        const r = node.getBoundingClientRect();
+        out.push({
+          tag: (node.tagName || "?").toLowerCase(),
+          cls: String(node.className || "").slice(0, 60),
+          w: Math.round(r.width),
+          h: Math.round(r.height),
+          bg: cs.backgroundColor,
+          bgImage: String(cs.backgroundImage || "none").slice(0, 90),
+          filter: cs.backdropFilter || cs.webkitBackdropFilter || "none",
+          radius: cs.borderRadius,
+          frosted: node.classList.contains(FROST_CLASS),
+          reason: frostReason(node) || "ok",
+        });
+        node = node.parentElement;
+      }
+      return { injectedCount: injectedKeys.size, levels: out };
     }
 
     function frostScan(root) {
@@ -542,8 +590,14 @@ const DshSkin = (() => {
       if (ambientStyleEl) ambientStyleEl.textContent = "";
     }
 
-  // ── 对外接口：只此四个 ─────────────────────────────────────────────
+  // ── 对外接口 ──────────────────────────────────────────────────────
   return {
+    /**
+     * 诊断用：从某元素沿祖先链给出"该不该磨砂 + 为什么 + 关键样式"。
+     * 只读。它存在的理由：输入框磨砂那件事猜了两轮都没中，
+     * 而原先的 frostMatches 只回 true/false，问不出是哪一道闸拦的。
+     */
+    explainFrost,
     /**
      * 登记背景图层。它由外面创建（要用 React 渲染），这里只记住它，
      * 用途是"别把我们自己的图层也磨砂了"这条判断。

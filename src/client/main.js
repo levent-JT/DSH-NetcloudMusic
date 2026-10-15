@@ -44,6 +44,23 @@
      * 从时间线上能直接看出它是从没出现过、还是出现过又消失了。
      */
 
+    /**
+     * 诊断 DSH 主页面底部那个输入框（它的类名我们够不到，用 textarea 反查）。
+     * 报回祖先链每层的尺寸/背景色/背景图/是否已磨砂/被拒理由。
+     * 只在排查输入框磨砂时用，量完就撤。
+     */
+    function reportInputDockFrost(tag) {
+      try {
+        const ta = document.querySelector("textarea");
+        if (!ta) return;
+        const wrap = ta.closest("form") || ta.parentElement || ta;
+        const info = DshSkin.explainFrost(wrap, 6);
+        reportClientError("input-frost:" + tag, { message: JSON.stringify({ tag, ...info }) });
+      } catch (e) {
+        /* 诊断失败不影响功能 */
+      }
+    }
+
     function reportClientError(where, err) {
       try {
         const payload = {
@@ -2855,6 +2872,8 @@ div[role=presentation]:has(>div[aria-hidden=true]:first-child)>div[aria-hidden=t
         )
       );
       // 排两次：一次同步（刚注册完）、一次延迟 2.5s（等 React 提交完 + 数据拉回来）
+      // 输入框磨砂的诊断：DSH 的组件挂载比我们晚，多采几次。
+      [3000, 8000, 15000].forEach((ms) => setTimeout(() => reportInputDockFrost("t+" + ms + "ms"), ms));
       // 这里曾挂着一整套一次性 DOM 诊断（页签容器存在性时间线、输入框祖先链倒树），
       // 用来定位"组件没抛错但界面空白""输入框没磨砂"那两次故障。故障都已定位并修掉，
       // 探针撤掉；报错能力（reportClientError + 错误边界）保留。
