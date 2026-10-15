@@ -170,41 +170,47 @@ try {
   const render = () => { seenNodes = []; hookIndex = 0; walk(React.createElement(pageCmp, {})) }
   render()
 
-  // ── A) 登录了就能开：不需要先把队列切到「我喜欢的音乐」 ──────────
-  // 官方：pid（种子歌单）必须是红心歌单，这一点由插件用 likedPlaylistId 保证；
-  // 与"此刻在播哪个歌单"无关。锚点只影响推荐风格（实测锚点不同、首曲不同）。
-  // 初始状态是每日推荐（playSongs 不带 source），正好覆盖用户报的那个场景。
+  // ── A) 登录了就进循环：模式按钮的 title 里应出现心动这一档 ──────
+  // 官方：心动是「第四种播放模式」，插在原有三种里。能否出现只取决于种子歌单
+  // 是否具备（登录即有红心歌单 id），与此刻在播哪个歌单无关。
+  // 初始状态是每日推荐（playSongs 不带 source），正好覆盖用户报的场景。
   render()
   ok(click(findByText('播放器')), '进「播放器」子页签')
   await flush(); render()
-  const hb0 = findHeartbeat()
-  ok(!!hb0, '播放器页里有心动开关按钮')
-  ok(!!hb0 && hb0.props.disabled !== true, '★ 未进红心歌单也能点（旧实现这里必然是灰的）', hb0 ? 'title=' + hb0.props.title : '')
 
-  // ── B) 打开心动 ─────────────────────────────────────────────
-  const hbClick = findHeartbeat()
-  ok(click(hbClick), '点下心动开关')
-  await flush(); render()
-  const hb2 = findHeartbeat()
-  const onNow = !!hb2 && String(hb2.props.className || '').indexOf('nm-heartbeat-on') >= 0
-  ok(onNow, '★ 心动模式已开启（按钮进入开启态）', hb2 ? 'className=' + String(hb2.props.className) : '')
+  const modeTitle = () => {
+    const n = findByTitle('播放模式：')
+    return n ? String(n.props.title) : ''
+  }
+  const modeIsHeartbeat = () => modeTitle().indexOf('播放模式：心动模式') === 0
+  const modeClass = () => {
+    const n = findByTitle('播放模式：')
+    return n ? String(n.props.className || '') : ''
+  }
+
+  ok(!!findByTitle('播放模式：'), '播放器页里有播放模式按钮')
+  ok(modeTitle().indexOf('含心动模式') >= 0, '★ 模式循环里含心动这一档（登录即具备种子歌单）', modeTitle())
+  ok(!modeIsHeartbeat(), '初始不是心动模式', modeTitle())
+
+  // ── B) 点模式按钮，走完 顺序→循环→单曲→随机→心动 ──────────────
+  const seen = []
+  for (let i = 0; i < 6 && !modeIsHeartbeat(); i++) {
+    ok(click(findByTitle('播放模式：')), '点播放模式按钮（第 ' + (i + 1) + ' 次）')
+    await flush(); render()
+    seen.push(modeTitle().replace('播放模式：', '').replace('（点击切换，含心动模式）', ''))
+  }
+  ok(modeIsHeartbeat(), '★ 连点后进入心动模式', '依次经过：' + seen.join(' → ') + ' → ' + modeTitle())
+  ok(modeClass().indexOf('nm-heartbeat-on') >= 0, '心动态下按钮变粉', modeClass())
 
   const hbCall = calls.find((u) => u.indexOf('intelligence') >= 0)
   ok(!!hbCall, '确实调用了 /playmode/intelligence/list')
-  // 核心：pid 必须是红心歌单（官方唯一硬性条件），与在播歌单无关
   const pidHit = !!hbCall && hbCall.indexOf(encodeURIComponent(LIKED_PID)) >= 0
-  ok(pidHit, '★★ 种子歌单(pid)传的是「我喜欢的音乐」' + LIKED_PID, hbCall ? decodeURIComponent(hbCall).slice(-120) : '')
-
-  // ── D) 播放模式锁定（官方：心动开启时播放模式无法自由切换）─────
-  const mb = findByTitle('播放模式')
-  ok(!!mb && mb.props.disabled === true, '心动开启时播放模式按钮被锁定')
+  ok(pidHit, '★★ 种子歌单(pid)传的是「我喜欢的音乐」' + LIKED_PID, hbCall ? decodeURIComponent(hbCall).slice(-110) : '')
 
   // ── E) ★ 从别的入口（每日推荐，不传 source）开始播放，心动必须还在 ★
   render()
   ok(click(findByText('推荐')), '切到「推荐」子页签（每日推荐）')
   await flush(); render()
-
-  // 每日推荐要先真的加载出来，否则「播放全部」是 disabled 的，click 会（也应该）失败。
   const loadDaily = seenNodes.find((n) => (n.props && n.props.children) === '点击加载每日推荐' && typeof n.props.onClick === 'function')
   if (loadDaily) {
     ok(click(loadDaily), '先加载每日推荐')
@@ -218,18 +224,15 @@ try {
 
   ok(click(findByText('播放器')), '切回「播放器」子页签')
   await flush(); render()
-  const hb3 = findHeartbeat()
-  const stillOn = !!hb3 && String(hb3.props.className || '').indexOf('nm-heartbeat-on') >= 0
-  ok(stillOn, '★★ 从别的来源开始播放后，心动模式仍然挂着（这就是旧版的 bug）', hb3 ? 'className=' + String(hb3.props.className) : '')
+  ok(modeIsHeartbeat(), '★★ 从别的来源开始播放后，心动模式仍然是当前模式（这就是旧版的 bug）', modeTitle())
+  ok(modeClass().indexOf('nm-heartbeat-on') >= 0, '★★ 按钮仍然是粉色', modeClass())
 
   // ── F) 关闭 ─────────────────────────────────────────────────
-  const hbOff = findHeartbeat()
-  ok(click(hbOff), '再点一次关闭心动')
+  const before = modeTitle()
+  ok(click(findByTitle('播放模式：')), '再点一次播放模式按钮（从心动切走）')
   await flush(); render()
-  const hb4 = findHeartbeat()
-  ok(!!hb4 && String(hb4.props.className||'').indexOf('nm-heartbeat-on')<0, '心动已关闭')
-  const mb2 = findByTitle('播放模式')
-  ok(!!mb2 && mb2.props.disabled !== true, '关闭后播放模式按钮解锁')
+  ok(!modeIsHeartbeat(), '心动已退出，模式切到了下一档', before + '  →  ' + modeTitle())
+  ok(modeClass().indexOf('nm-heartbeat-on') < 0, '按钮不再变粉', modeClass())
 } catch (e) {
   ok(false, '执行抛错', e.message)
   console.log('')

@@ -227,6 +227,40 @@
       }
     }
 
+    /**
+     * 诊断主页面底部那个输入框（DSH 自己的组件，我们够不到它的类名）。
+     * 报回它的实际背景色、backdrop-filter、尺寸，以及它在用什么令牌 ——
+     * 这样"为什么没磨上"就不用猜了。
+     */
+    function reportInputDock(tag) {
+      try {
+        // 用 textarea 反查：输入框一定是它的祖先里最外那层"卡片"
+        const ta = document.querySelector("textarea");
+        if (!ta) return;
+        const chain = [];
+        let el = ta;
+        for (let i = 0; i < 6 && el; i++) {
+          const cs = getComputedStyle(el);
+          const r = el.getBoundingClientRect();
+          chain.push({
+            tag: (el.tagName || "?").toLowerCase(),
+            cls: String(el.className || "").slice(0, 70),
+            w: Math.round(r.width),
+            h: Math.round(r.height),
+            bg: cs.backgroundColor,
+            filter: cs.backdropFilter || cs.webkitBackdropFilter || "none",
+            // 它自己在用哪些我们改写过或可能磨砂的令牌
+            varBgBase: cs.getPropertyValue("--dsw-alias-bg-base").trim(),
+            varBgSecondary: cs.getPropertyValue("--dsw-alias-bg-secondary").trim(),
+          });
+          el = el.parentElement;
+        }
+        reportClientError("input-dock:" + tag, { message: JSON.stringify({ tag, chain }) });
+      } catch (e) {
+        /* 诊断失败不影响功能 */
+      }
+    }
+
     function reportClientError(where, err) {
       try {
         const payload = {
@@ -875,57 +909,47 @@
      * 官方把它设计成「第四种播放模式」（单曲循环 / 顺序 / 随机 / 心动），
      * 只在播放红心歌单时出现——所以这一档是否可用取决于当前队列的来源。
      */
+    /**
+     * 播放模式的档位：顺序 → 循环 → 单曲 → 随机 →（心动模式）。
+     *
+     * 官方把它设计成「第四种播放模式」，插在原有三种里；能否出现只取决于种子歌单
+     * 是否具备（登录即有红心歌单 id），与此刻在播哪个歌单无关。
+     *
+     * 上一版让它"只在当前队列来自我喜欢的音乐时才出现"，于是从日推/搜索/任意歌单
+     * 听歌时它从循环里消失，cycleMode 的 indexOf 返回 -1 → 悄悄退回顺序 ——
+     * 这就是"两个播放器上都点不了心动"和"切首歌就被取消"的共同原因。
+     *
+     * 再上一版（更早）它虽然一直在循环里，但那时判据也错，所以同样点不到。
+     * 判据修对之后，放在循环里就是对的：官方本来就是这么设计的。
+     */
     function modeOptions() {
-      // 只有经典四档。心动模式不在这里 —— 它是独立的开关，见 HeartbeatButton。
-      // 塞进循环里的后果：要连点 4 次才轮到（用户点不到），而且队列来源一变
-      // 这一档就消失，indexOf 返回 -1 把模式算成顺序（"切歌就退出心动"）。
-      return ["sequence", "loop", "single", "shuffle"];
+      const order = ["sequence", "loop", "single", "shuffle"];
+      if (canStartHeartbeat()) order.push("heartbeat");
+      return order;
     }
 
     function cycleMode() {
-      // 官方：「在原有的心动模式下，播放模式是无法自由切换的。」
-      if (store.heartbeat) {
-        setNotice("心动模式开启时不能切换播放模式，先关掉心动模式");
-        return;
-      }
       const order = modeOptions();
       const nextMode = order[(order.indexOf(store.mode) + 1) % order.length];
-      setMode(nextMode, true);
-    }
-
-    /**
-     * 心动模式开关。
-     *
-     * 开启条件与官方一致：当前队列来自「我喜欢的音乐」。开启后是**无限电台** ——
-     * 队列走完自动续杯（见 next()），不因切歌而退出。
-     */
-    function toggleHeartbeat() {
+      if (nextMode === "heartbeat") {
+        // 切到心动模式：锚点**就是此刻正在播放的这一首**
+        // （官方："心动模式重点关注开启时正在播放的那首单曲……此刻你在听摇滚，
+        //   算法将优先推荐摇滚歌曲"）。不能拿"队列第一首"之类顶替。
+        // 实测锚点不要求是红心歌：任意歌、甚至 0，接口都接受。
+        if (!store.song) {
+          setNotice("先播放一首歌，再开启心动模式");
+          return;
+        }
+        startHeartbeat(store.likedPlaylistId, String(store.song.id));
+        return;
+      }
+      // 从心动切到别的模式 → 退出（种子上下文一并清掉）。
+      // 不自动退出是另一回事（切歌不该带走它），用户主动切走当然要退。
       if (store.heartbeat) {
-        stopHeartbeat();
-        return;
+        store.heartbeat = false;
+        store.heartbeatCtx = null;
       }
-      if (!store.login || !store.likedPlaylistId) {
-        setNotice("心动模式只支持「我喜欢的音乐」，请先登录");
-        return;
-      }
-      // 锚点必须是正在播放的那一首（官方："重点关注开启时正在播放的那首单曲"）。
-      // 没有在播的歌就没有锚点，不能拿歌单第一首顶替 —— 锚点错了推荐风格整个就错了。
-      // 实测锚点不要求是红心歌：任意歌、甚至 0，接口都接受。
-      if (!store.song) {
-        setNotice("先播放一首歌，再开启心动模式");
-        return;
-      }
-      startHeartbeat(store.likedPlaylistId, String(store.song.id));
-    }
-
-    /** 关闭心动模式：只解闩锁，不动当前播放与队列。 */
-    function stopHeartbeat() {
-      store.heartbeat = false;
-      store.heartbeatCtx = null;
-      store.mode = "sequence";
-      saveResume();
-      emit();
-      setNotice("已退出心动模式");
+      setMode(nextMode, true);
     }
 
     function setMode(mode, persist) {
@@ -1505,57 +1529,23 @@
     }
 
     /**
-     * 播放模式按钮：顺序 → 循环 → 单曲 → 随机。
+     * 播放模式按钮：顺序 → 循环 → 单曲 → 随机 →（心动模式）。
      * props: size 图标尺寸；disabled；className。
      *
-     * 心动模式不在这里 —— 见下面的 HeartbeatButton。开启心动时本按钮禁用
-     * （官方：「在原有的心动模式下，播放模式是无法自由切换的。」）。
+     * 心动模式下按钮变粉（nm-heartbeat-on），一眼看出当前是不是心动。
+     * 不禁用 —— 否则切进去就出不来了。
      */
     function ModeButton(props) {
       const p = props || {};
       useStore();
-      const locked = !!store.heartbeat;
-      return Btn({
-        className: p.className || "",
-        disabled: p.disabled === true || locked,
-        title: locked
-          ? "心动模式开启时不能切换播放模式"
-          : `播放模式：${MODE_LABELS[store.mode] || store.mode}（点击切换）`,
-        onClick: cycleMode,
-        children: el(ModeIcon, { mode: store.mode, size: p.size || 14 }),
-      });
-    }
-
-    /**
-     * 心动模式开关（独立按钮，大小播放器共用）。
-     *
-     * 为什么不塞进播放模式循环里 —— 上一版就是这么写的，两个 bug 都出自这里：
-     *   1) 它是循环的第 5 档，要连点 4 次才轮到，而且每点一次图标都在变，
-     *      用户根本不知道点到了没有（"两个播放器上都点不了心动模式"）；
-     *   2) 它能不能出现在循环里取决于 queueSource，而每日推荐 / 私人 FM 这些
-     *      入口都不传 source，一放它们就把 queueSource 清成 null —— 于是这一档
-     *      从循环里消失，cycleMode 的 indexOf 返回 -1 → 悄悄退回「顺序」，
-     *      表现就是"切到一首没被我喜欢的歌，心动模式就被取消了"。
-     *
-     * props: size 图标尺寸；className；disabled。
-     */
-    function HeartbeatButton(props) {
-      const p = props || {};
-      useStore();
       const on = !!store.heartbeat;
-      // 开着的时候永远可点（用来关闭）；没开时只有「我喜欢的音乐」能开。
-      const can = on || canStartHeartbeat();
       return Btn({
         className: (p.className || "") + (on ? " nm-heartbeat-on" : ""),
         active: on,
-        disabled: p.disabled === true || !can,
-        title: on
-          ? "心动模式已开启（点击关闭）"
-          : can
-            ? "开启心动模式：以「我喜欢的音乐」为种子、当前这首歌为锚点，穿插推荐新歌"
-            : "心动模式需要登录后才能开启",
-        onClick: toggleHeartbeat,
-        children: el(ModeIcon, { mode: "heartbeat", size: p.size || 14 }),
+        disabled: p.disabled === true,
+        title: `播放模式：${MODE_LABELS[store.mode] || store.mode}（点击切换${canStartHeartbeat() ? "，含心动模式" : ""}）`,
+        onClick: cycleMode,
+        children: el(ModeIcon, { mode: store.mode, size: p.size || 14 }),
       });
     }
 
@@ -1673,7 +1663,8 @@
 
     /**
      * 歌曲列表。`source` 是队列来源歌单 { id, specialType }，会被透传给 playSongs ——
-     * 心动模式能否**开启**（HeartbeatButton 是否可点）就是靠它判断当前歌单是否「我喜欢的音乐」。
+     * 注意它**不再**决定心动模式能否开启 —— 开启只要求"登录且有红心歌单 id"。
+     * 心跳的种子歌单永远是「我喜欢的音乐」，与此刻在播哪个歌单无关。
      */
     function SongList(props) {
       const p = props || {};
@@ -2122,7 +2113,6 @@
             el("div", { className: "nm-pb-artist" }, song.artist + (song.album ? ` · ${song.album}` : ""))),
           TransportControls({ className: "nm-playerbar-transport", size: 16, playClass: "nm-btn-lg" }),
           ModeButton({ size: 15 }),
-          HeartbeatButton({ size: 15 }),
           LikeButton({ song })),
         el("div", { className: "nm-playerbar-progress" },
           el("span", { className: "nm-time" }, fmtTime(cur)),
@@ -2200,10 +2190,9 @@
             onChange: (e) => { if (audio) audio.currentTime = Number(e.target.value); },
           }),
           el("span", { className: "nm-time" }, fmtTime(dur))),
-        // 模式 + 心动 + 传输控制（共用控件；心动是独立开关，不在模式循环里）
+        // 模式 + 传输控制（共用控件；心动模式是模式循环里的一档）
         el("div", { className: "nm-player-transport" },
           ModeButton({ size: 18 }),
-          HeartbeatButton({ size: 18 }),
           TransportControls({ className: "nm-player-transport-inner", size: 22, playClass: "nm-btn-xl" })),
         // 音量
         store.modules.volume
@@ -2518,11 +2507,10 @@
             // 当前歌词放在 title 上：紧凑卡片没有第三行的位置，但信息不丢
             el("div", { className: "nm-side-sub", title: lyricText || "" }, song ? song.artist : "点这里打开播放器")),
           el("div", { className: "nm-side-ctl" },
-            // 爱心 / 传输控制 / 播放模式 / 心动开关，全部用共用控件
+            // 爱心 / 传输控制 / 播放模式（心动是模式里的一档），全部用共用控件
             LikeButton({ song }),
             TransportControls({ className: "nm-side-transport", size: 13 }),
-            ModeButton({ size: 13, disabled: !store.queue.length }),
-            HeartbeatButton({ size: 13, disabled: !store.queue.length })),
+            ModeButton({ size: 13, disabled: !store.queue.length })),
           el("input", {
             type: "range",
             className: "nm-side-progress",
@@ -3134,6 +3122,8 @@ div[role=presentation]:has(>div[aria-hidden=true]:first-child)>div[aria-hidden=t
       );
       // 排两次：一次同步（刚注册完）、一次延迟 2.5s（等 React 提交完 + 数据拉回来）
       reportDomDiag("sync");
+      // 输入框的诊断多采几次：它是 DSH 的组件，挂载时机比我们的晚
+      [2000, 6000, 12000].forEach((ms) => setTimeout(() => reportInputDock("t+" + ms + "ms"), ms));
       // 每 2 秒采一次、持续 40 秒：间歇性故障要靠时间线抓，单点快照抓不到。
       // 这段时间里请把「网易云音乐」页签点开，否则采到的都是"没激活所以没渲染"。
       samplePresence();

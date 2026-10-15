@@ -207,7 +207,17 @@ const DshSkin = (() => {
      * 会把元素变成**包含块与层叠上下文**，里面的 `position: fixed` 后代会被重新
      * 锚定到它身上而不是视口 —— 实测把整页级容器磨上之后**整个左侧栏直接消失**。
      */
-    const NO_FROST_NAME_RE = /(bg-base|sidebar-fill)/i;
+    /**
+ * 不再按令牌名排除任何底。
+ *
+ * 这里曾经写着 /(bg-base|sidebar-fill)/i —— 那是早期为了防"磨了整页容器导致
+ * 侧栏整个飞走"打的补丁。但那个问题的正解是**尺寸闸门**（见 frostMatches：
+ * 高度 ≥88% 视口、或面积 >85% 视口 一律不磨），闸门到位后按名字的一刀切就成了
+ * 残留：任何用 --dsw-alias-bg-base 画的**小**控件都会被误伤 ——
+ * 主页面底部那个输入框就是这么丢掉磨砂的。
+ *
+ * 现在只由形态（尺寸）决定，与令牌叫什么名字无关。
+ */
 
     /**
      * 磨砂范围。由外面通过 applySkin 传进来（默认 layout）。
@@ -218,7 +228,7 @@ const DshSkin = (() => {
      */
     let frostMode = 'layout'
     function isFrostWorthyToken(name) {
-      return !NO_FROST_NAME_RE.test(name);
+      return true; // 交给 frostMatches 的尺寸闸门判断
     }
 
     function frostMatches(el) {
