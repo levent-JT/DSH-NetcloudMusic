@@ -47,7 +47,8 @@
     "vendor/qr.mjs",
     "cordis.patch.yml",
     "THIRD-PARTY-NOTICES.md",
-    "LICENSE"
+    "LICENSE",
+    "screenshots.json"
   ],
   "engines": {
     "dsh": ">=0.1.0"
