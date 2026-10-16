@@ -26,6 +26,8 @@ import { fileURLToPath } from 'node:url'
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SRC = path.join(ROOT, 'src', 'client')
 const OUT = path.join(ROOT, 'lib', 'client.js')
+// 临时文件名以 .tmp 结尾（不是 .js）：免得任何按 *.js 通配的监听把它当成产物。
+const TMP = OUT + '.tmp'
 
 /**
  * 拼接顺序 = 依赖顺序：后面的分片可以使用前面分片定义的命名空间。
@@ -47,8 +49,42 @@ for (const name of PARTS) {
 }
 
 const out = HEADER + chunks.join('\n\n') + FOOTER
+// 写盘前自检：产物必须是完整的「头 + 体 + 尾」。缺任何一段都说明拼接出了问题，
+// 宁可构建失败，也不要写一个半成品出去让用户看到「插件加载失败」。
+if (!out.startsWith(HEADER) || !out.endsWith(FOOTER) || !out.includes('exports.apply')) {
+  throw new Error('构建自检失败：产物不完整，拒绝写盘')
+}
 fs.mkdirSync(path.dirname(OUT), { recursive: true })
-fs.writeFileSync(OUT, out, 'utf8')
+
+/**
+ * 原子写：先写临时文件，再改名覆盖。
+ *
+ * 为什么必须这样（2026-10-16 事故）：DSH 会监听这个产物并**热重载**客户端插件。
+ * 原来直接 `writeFileSync(OUT, …)` —— 它是「先截断、再写入」，中间存在一个
+ * 文件只剩半截的窗口。DSH 一旦在这个窗口里读到它，就是拿半截 JS 去解析，
+ * 表现是「插件加载失败」，重启才恢复（重启时文件已经写完了）。
+ *
+ * 同目录内改名是原子操作：读者要么看到旧内容、要么看到新内容，不存在中间态。
+ * Windows 上目标被占用会抛 EPERM/EBUSY，所以重试几次再退化为直接写。
+ */
+fs.writeFileSync(TMP, out, 'utf8')
+let replaced = false
+for (let i = 0; i < 20 && !replaced; i++) {
+  try {
+    fs.renameSync(TMP, OUT)
+    replaced = true
+  } catch (err) {
+    if (err.code !== 'EPERM' && err.code !== 'EBUSY' && err.code !== 'EACCES') throw err
+    // 同步脚本里没有 await，用 Atomics.wait 做一次 50ms 的同步等待
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50)
+  }
+}
+if (!replaced) {
+  fs.writeFileSync(OUT, out, 'utf8')
+  console.log('[build-client] ⚠ 原子改名失败，已退化为直接写 —— 此刻的热重载可能读到半截文件')
+}
+try { fs.unlinkSync(TMP) } catch (err) { /* 改名成功后临时文件已不存在，忽略 */ }
+
 console.log(
   '[build-client] ' + PARTS.length + ' 个分片 → ' + path.relative(ROOT, OUT).replace(/\\/g, '/') +
     '  (' + out.split('\n').length + ' 行, ' + out.length + ' 字符)'
