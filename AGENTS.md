@@ -98,6 +98,26 @@ endpoint= https://interface.music.163.com/eapi<path>
 UA      = NeteaseMusic/9.5.61.260802021928(9005061);…
 ```
 
+### 私人FM：明文可用（推翻旧结论）
+
+**旧结论「私人FM 需要 weapi 加密，本插件明文直连做不到」是错的。**
+真账号实测（连打三次一致）：
+
+```
+GET https://music.163.com/api/v1/radio/get
+  → code=200, data[3]，字段 name/id/artists[]/album.picUrl/duration(毫秒)
+```
+
+带 `os=pc; appver=8.9.70` + MUSIC_U/__csrf 就够，不需要 weapi。
+返回形状 `{code, data:[...]}` 正是客户端 `loadFm()` 期望的，
+`norm()` 里那句 "FM tracks carry duration in ms without dt" 本来就是为它写的 ——
+**整套客户端 FM 功能（loadFm / FmView / 页签 / 开关 / 时长适配）一直是齐的，
+只是被宿主一句 throw 挡在门外。**
+
+**教训**：一个"做不到"的结论如果没留下实测记录，就该当成可疑 ✓
+它可能只是当年某次没试对。**下结论时把用的端点和返回码一起写进注释**，
+后人（和未来的我）才有复核的对象。
+
 ### 音质阶梯（歌曲 287398 实测）
 
 ```
@@ -699,6 +719,13 @@ CDP 量到：33 个磨砂元素总面积 1.15M px²，**最大的两块 1000×22
   只是这条一直挂着没销账。**教训：验证一个"疑似已修"的问题，成本是一次 CDP 查询；
   让它躺在待办里才是浪费。** `explainFrost` 的诊断能力保留。
 - **智能推荐模式（2021）没做**：种子是当前播放列表、可自由切模式、推全新歌。接口与心动模式不同。
+- **已实测可用、但还没接进插件的接口**（2026-10-16 三轮探测，真账号）：
+  相似歌曲 `/api/discovery/simiSong`（eapi，songs[]）· 相似歌单 `/api/discovery/simiPlaylist`（eapi）·
+  官方榜单 `/api/toplist`（明文，64 个榜）· 推荐歌单 `/api/v1/discovery/recommend/resource`（明文，21 个）·
+  雷达 `/api/personalized/playlist` · 收藏歌手 `/api/artist/sublist` · 收藏专辑 `/api/album/sublist`（eapi）·
+  收藏 MV `/api/mv/sublist` · 歌手详情 `/api/artist/head/info/get` · 红心全量 `/api/song/like/get`。
+  **探不通的**（明文和 eapi 都 404，是路径没找对，不是网易云没有）：
+  听歌排行 / 歌曲评论 / 最近播放 / VIP 成长 / 场景音乐。
 - **`SettingsView` 218 行**：拆分候选，但**慎动** —— 用户被我的重构炸过两次。
 - **`main.js` 仍 2800+ 行**：真要拆就按视图切（SettingsView / SidebarPlayer / PlayerView 各自自洽），风险最低。
 - **`conversation.session.header.actions` 桥接**：`Ctrl+Shift+M` 那条路径是死的。

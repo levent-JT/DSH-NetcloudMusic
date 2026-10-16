@@ -147,9 +147,27 @@ for (const lv of ['standard', 'higher', 'exhigh', 'lossless', 'hires', 'jyeffect
   ok(hasUrl && httpsUrl, 'level=' + lv.padEnd(9) + ' br=' + String(d && d.br).padEnd(8) + ' type=' + String(d && d.type).padEnd(5) + ' sr=' + (d && d.sr), '')
 }
 
-// 9) 未实现接口应给出明确报错而非静默失败
+// 9) 私人FM：以前这条断言的是"必须报 weapi 错误"，而那个结论是错的 ——
+//    真账号实测明文 GET /api/v1/radio/get 返回 code=200 + 3 首完整歌曲。
+//    宿主已改成真实调用，所以这里断言新行为：200 + data 是非空数组 + 字段形状
+//    满足客户端 norm()（id / name / artists[] / duration 毫秒）。
 r = await call('/plugin/netease-music/api?method=%2Fpersonal_fm')
-ok(r.body.status === 502 && /weapi/.test(r.body.body.message || ''), '/personal_fm 明确报错（含 weapi 提示）', 'status=' + r.body.status)
+{
+  const b = r.body && r.body.body
+  const arr = b && b.data
+  const first = Array.isArray(arr) && arr[0]
+  ok(
+    r.body.status === 200 && b.code === 200 && Array.isArray(arr) && arr.length > 0,
+    '/personal_fm 返回 code=200 且 data 非空',
+    'status=' + r.body.status + ' code=' + (b && b.code) + ' n=' + (Array.isArray(arr) ? arr.length : '?')
+  )
+  ok(
+    !!first && first.id !== undefined && typeof first.name === 'string' &&
+      Array.isArray(first.artists) && typeof first.duration === 'number' && first.duration > 3600,
+    '  FM 字段满足客户端 norm()（id/name/artists[]/duration 毫秒）',
+    first ? 'duration=' + first.duration : '无数据'
+  )
+}
 
 // 10) 扫码登录三步（只验证 key/create，不真扫）
 r = await call('/plugin/netease-music/api?method=%2Flogin%2Fqr%2Fkey')
@@ -161,20 +179,33 @@ if (unikey) {
   ok(typeof qrimg === 'string' && qrimg.startsWith('data:image/svg+xml;base64,'), '/login/qr/create 返回 data.qrimg（SVG data URL）', '长度=' + (qrimg ? qrimg.length : 0))
 }
 
-// 11) 非本机来源应被拒
-r = await new Promise((resolve) => {
-  const req = Object.assign(Readable.from([]), {
-    method: 'GET',
-    url: '/plugin/netease-music/settings',
-    socket: { remoteAddress: '127.0.0.1' },
-    headers: {},
+// 11) 非本机来源应被拒。
+//
+// **这条以前一直是红的，而且红得有理 —— 是测试自己写错了，不是安全漏洞。**
+// 桩里填的是 remoteAddress: '127.0.0.1'，那恰恰是本机地址，守卫按设计放行，
+// 它却断言 403。名字说"非本机来源"，数据给的是本机，自相矛盾。
+// （隔离验证过：把 lib/index.js 换回 HEAD 版本，这条同样红 —— 与 FM 改动无关。）
+//
+// 守卫在 handle() 里，而注册的 handler 会调 handle()，所以换掉 IP 就能真的测到。
+// 顺带把"本机仍应放行"也钉上 —— 只测拒绝、不测放行，等于半个测试。
+async function rawCall(pathname, ip) {
+  return new Promise((resolve) => {
+    const req = Object.assign(Readable.from([]), {
+      method: 'GET',
+      url: pathname,
+      socket: { remoteAddress: ip },
+      headers: {},
+    })
+    let status = 0
+    let text = ''
+    const res = { writeHead(c) { status = c; return this }, end(ch) { if (ch) text += ch } }
+    pick(pathname)(req, res).then(() => resolve({ status, text }))
   })
-  let status = 0
-  let text = ''
-  const res = { writeHead(c) { status = c; return this }, end(ch) { if (ch) text += ch } }
-  pick('/plugin/netease-music/settings')(req, res).then(() => resolve({ status, text }))
-})
+}
+r = await rawCall('/plugin/netease-music/settings', '203.0.113.9')
 ok(r.status === 403, '非 loopback 请求被拒 403', 'status=' + r.status)
+r = await rawCall('/plugin/netease-music/settings', '::ffff:127.0.0.1')
+ok(r.status === 200, 'loopback（IPv6 映射形式）仍然放行', 'status=' + r.status)
 
 console.log(results.join('\n'))
 const fails = results.filter((x) => x.startsWith('  [FAIL]')).length
