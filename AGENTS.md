@@ -302,6 +302,7 @@ const enabled = skinOn && mode !== "off" && !!cover;
 老配置里没有这个键，靠 `ambient: { ...DEFAULT_SETTINGS.ambient, ...(raw.settings.ambient || {}) }`
 的逐键合并补上（所以改默认值对老用户生效 —— 注意这条与文件顶部"改了默认值对老用户不生效"
 的迁移注释是两回事：那条说的是有专门迁移代码的地方）。
+
 ### 别按令牌名一刀切
 
 曾经有 `NO_FROST_NAME_RE = /(bg-base|sidebar-fill)/i`，是防"磨了整页容器"的早期补丁。
@@ -488,6 +489,7 @@ React 组件抛错会**卸载整个 root**，表现是"一片空白、什么都�
 - **断言总数是一个信号**：数字变了就要问为什么。这次是 24→23，我差点当成"改文案的正常代价"。
 - 断言失败时**把现场打出来**（比如"实际发出的请求列表"），不要只说"没找到"。
   这次就是靠打印实际调用列表，才看出请求根本没发出去。
+
 ### #18 DSH 的视图容器是 flex-shrink:0 —— height:100% 会参照错的父高
 
 **症状**（用户报的）："点开网易云音乐，很容易直接滚动条拉到底"。
@@ -526,10 +528,42 @@ DSH 升级后 hash 变了会失配：**失配只是退回旧行为（页面能�
 
 **教训**：插件视图的"高度 100%"不能想当然。**先量祖先链，确认"确定高度"在哪一层断掉**，
 再决定修哪一层 —— 我一开始只盯着自己的 CSS 看，什么问题都看不出来。
-### #14 CRLF
 
-仓库里的文件全是 CRLF。脚本里做多行字符串替换时**必须把 `\n` 换成 `\r\n`**，
-否则匹配静默失败（命中 0 次，什么也没改，但脚本"成功"返回）。
+### #14 换行符：仓库按 LF 存，工作区是混的 —— 这条原来写反了
+
+**原文写着「仓库里的文件全是 CRLF」，是反的。** 实测普查（33 个被追踪文件）：
+
+```
+LF     24 个   ← 大多数（README / main.js / lib/index.js / 全部 test/ …）
+CRLF    2 个   scripts/cdp.mjs、src/client/skin/dsh.js
+混合    3 个   AGENTS.md(281/467)、lib/client.js(865/3645)、vendor/qr.mjs(1/80)
+binary  4 个   4 张截图
+```
+
+而 `.gitattributes` 写的是 `* text=auto eol=lf` —— **仓库的约定是 LF。**
+工作区之所以是混的：git 提交时会把 CRLF 归一成 LF（每次 commit 都在警告
+「CRLF will be replaced by LF the next time Git touches it」），
+但本地工具/脚本写进工作区的 CRLF 会留着，于是同一份文件里两种混在一起。
+
+**⇒ 规矩**：
+- **不要假设任何一种换行符。** 写替换脚本时，锚点先按原样找，找不到就换成另一种 EOL
+  再试一次 —— 两种都找不到才报错，而不是赌一种。
+- 旧规矩「必须把 `\n` 换成 `\r\n`」正是这个赌，而且它赌反了：
+  照它做，在 LF 文件上必然匹配失败。
+- **断言命中数（见 #15）仍然是最后防线**：赌错了会抛，不会静默改坏文件。
+- 新建文件一律用 LF。
+
+参考写法（两种 EOL 都试）：
+
+```js
+function swap(s, from, to) {
+  for (const eol of ["\n", "\r\n"]) {
+    const a = from.replace(/\n/g, eol)
+    if (s.includes(a)) return s.split(a).join(to.replace(/\n/g, eol))
+  }
+  throw new Error("两种 EOL 都没匹配上：" + from.slice(0, 60))
+}
+```
 
 ---
 
@@ -578,6 +612,7 @@ npm publish --registry=https://registry.npmjs.org/
 **克隆前先看一眼的同类插件**：ncm-player（3★ 浮窗）、dsh-music-player（17★ 本地音乐+朗读）、
 SinglePlayer（2★ AI 聚合）、dsh-MusicPlayer（4★ 悬浮窗）。我们的差异是整页页签 + 沉浸式
 背景皮肤 + 心动模式（2018 官方语义）+ 音质阶梯 + 侧栏播放器，以及唯一的「DSH 皮肤总开关」。
+
 ## 5. 构建与验证的工具链（照着用）
 
 ```powershell
@@ -730,6 +765,7 @@ CDP 量到：33 个磨砂元素总面积 1.15M px²，**最大的两块 1000×22
 - **`main.js` 仍 2800+ 行**：真要拆就按视图切（SettingsView / SidebarPlayer / PlayerView 各自自洽），风险最低。
 - **`conversation.session.header.actions` 桥接**：`Ctrl+Shift+M` 那条路径是死的。
 - **`DATA_DIR` 在模块加载时求值**：多 profile 的配置不独立，要改得配 Cookie 迁移。
+
 ## 9. 我自己的行为准则（血泪版）
 
 1. **先核实，再动手**。外部系统行为上网查 / 用真账号实验；不要从自己的代码反推语义。
