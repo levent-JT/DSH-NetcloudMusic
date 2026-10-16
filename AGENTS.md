@@ -163,7 +163,7 @@ DSH 的次要文字令牌是**半透明白**（如 `rgba(255,255,255,.35)`），
 尺寸小 (<48×28)                     → too-small
 高 >= 88% 视口高                     → full-height-region（常驻版式区域：左侧栏、主对话区）
 面积 > 85% 视口面积                  → full-page-area（整页级容器）
-背景色不是我们改写过的令牌            → bg-not-a-rewritten-token   ← 输入框卡在这
+背景色不是我们改写过的令牌            → bg-not-a-rewritten-token   ← 曾经的输入框（§8 已销账）
 背景色是 transparent/解析不出来       → bg-transparent-or-unparsable
 ```
 
@@ -692,10 +692,12 @@ CDP 量到：33 个磨砂元素总面积 1.15M px²，**最大的两块 1000×22
 
 ## 8. 待办 / 已知欠缺
 
-- **输入框磨砂**：`DshSkin.explainFrost` 已能给出逐层拒绝理由（`too-small` /
-  `full-height-region` / `full-page-area` / `bg-not-a-rewritten-token` …）。
-  **不用再埋探针等 F5** —— 直接用 `scripts/cdp.mjs` 查，一次定位。
-  最可疑仍是 `bg-not-a-rewritten-token`：它要求背景色"正好是我们改写过的令牌"。
+- ~~**输入框磨砂**~~ **已验证修好（2026-10-16，CDP 现场）**：输入卡
+  `RlGAzG_card` 现在带着 `nm-frost`，底色 `rgba(255,255,255,0)` 正是改写后的
+  `--dsw-alias-bg-base`，三道闸（尺寸/高度/面积）全过，还按面积拿到了 12px blur。
+  根因是当年按令牌名一刀切的 `NO_FROST_NAME_RE`，`7cec71c` 删掉它时就治好了 ——
+  只是这条一直挂着没销账。**教训：验证一个"疑似已修"的问题，成本是一次 CDP 查询；
+  让它躺在待办里才是浪费。** `explainFrost` 的诊断能力保留。
 - **智能推荐模式（2021）没做**：种子是当前播放列表、可自由切模式、推全新歌。接口与心动模式不同。
 - **`SettingsView` 218 行**：拆分候选，但**慎动** —— 用户被我的重构炸过两次。
 - **`main.js` 仍 2800+ 行**：真要拆就按视图切（SettingsView / SidebarPlayer / PlayerView 各自自洽），风险最低。
