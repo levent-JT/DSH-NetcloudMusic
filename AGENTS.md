@@ -51,8 +51,23 @@ cache.js → lyrics.js → skin/dsh.js → skin/palette.js → skin/layers.js �
 客户端只通过 `HOST = /plugin/netease-music` 下的路径说话，宿主注册了 7 条 `kind:'exact'` 路由：
 
 ```
-/api  /settings  /status  /cookie  /logout  /restart  /state
+/api  /settings  /status  /cookie  /logout  /restart  /state  /commands
 ```
+
+**AI 指令通道（/commands）**：这条路由**长期不存在**（见踩坑 #22）。
+
+- `POST /commands` `{type, payload}` → 投递一条指令，返回 `{ok, seq}`；
+  可用类型见宿主的 `COMMAND_TYPES`（playSong / pause / toggle / next / previous /
+  setMode / volume / playDaily / playPlaylist），未知类型直接拒。
+- `GET /commands?since=<seq>` → `{since, commands[]}`，只返回 seq 更大的。
+- 客户端 `pollCommands`（1.2 秒一次，页面不可见时降到约 6 秒）领走后交给 `runCommand`。
+- 队列只留最近 50 条且不超过 5 分钟 —— 这是**实时通道，不是消息队列**。
+
+**`/state` 现在真的能用了**：客户端 `emit()` 会调 `scheduleReport()`（1.5 秒节流）
+把播放状态 POST 给宿主，宿主存在内存里。
+原先客户端的 `report()` **从来没被调用过** —— 宿主早就注册了路由并且会存，但没人喂它，
+于是"AI 能查播放状态"这个能力实际不存在。现在接上了。
+
 
 **四个挂载点**（id 各不相同 —— 曾经 `conversation.view` 和 `settings.section` 都用 `netease-music`，
 任何按 id 索引的实现都会互相覆盖，已拆开）：
@@ -642,6 +657,123 @@ page ? null : el(PlayerBar, {})      // ← main.js:2300，整页模式下直接
 实测结果：`NaCho · 破浪` + `超清母带 4750k` ✓
 
 
+### #21 样式注入不幂等 —— 热重载每来一次就多一份
+
+**症状**：审查时用 CDP 数样式，发现我们自己的两份样式被注入了 **4 份**：
+
+```
+dsh-netease-ambient ×4    dsh-netease-surfaces ×4    nm-style ×1（这个没问题）
+```
+
+**根因**：`DshSkin` 里 `surfaceStyleEl` / `ambientStyleEl` 是**模块级变量**。
+DSH 热重载后新实例里它们是 `null`，而 DOM 里上一份 `<style>` 还在 ——
+**DSH 不会可靠地调用旧实例的 disposer**。于是 `if (!el) createElement` 又建一个。
+那天我构建了二十几次，攒到 4 份（有些被正常的 clearSkin 清掉了）。
+
+**为什么值得修**：每多一份，压暗/磨砂那几十条规则就被重复匹配一次。
+放进交互路径里就是样式重算变慢 —— 而这是"越用越卡"型的问题，不会自己好。
+
+**修法**：注入前按 `data-plugin` 把 DOM 里的旧份全摘掉，让注入幂等。
+
+```js
+function removeStylesByPlugin(name) {
+  for (const el of document.querySelectorAll('style[data-plugin="' + name + '"]')) {
+    try { el.remove() } catch (err) { /* 非致命 */ }
+  }
+}
+```
+
+**实测效果**：4 份 → 1 份，而且**再连编两次仍然 1 份**（幂等性证明）。
+
+**对照**：`injectCss()` 一直是幂等的（先找 `#nm-style` 再复用），所以只有这两个漏了。
+**⇒ 规矩：任何往 head 里塞节点的代码，都应该按"能重复调"来写，而不是靠调用方保证只调一次。**
+在会热重载的环境里，"只调一次"这个假设一定不成立。
+
+**⚠️ 我差点在这里炸掉一次（同一天，第二轮）**：
+
+修完泄漏后我"顺手"把 `removeSurfaceStyle()` 也改成按属性删全部（想让 clearSkin 更彻底），
+结果**皮肤整片消失**：`surfaces` 0 份、`nm-frost` 0 个，而设置里 `ambient.enabled` 明明还是 `true`。
+
+**根因是热重载的时序**：
+
+```
+① 新实例挂载 → applySkin → ensureSurfaceStyle 建好 S1
+② 旧实例 unmount → 清理 → clearSkin → removeSurfaceStyle
+   ↑ 这里若"删全部"，就把刚建好的 S1 一起删了
+③ 新实例的 applySkin 有 signature 去重，认为自己已经应用过 → 不会再补
+⇒ 皮肤永久缺失，直到下一次状态变化
+```
+
+**正确分工（现在就是这样）**：
+- `ensureSurfaceStyle` / `ensureAmbientStyle`：注入前清旧份 —— **安全**，因为它是"先删后建"
+- `removeSurfaceStyle`：**只删自己手里这一份** —— 别人建的不归它管
+
+**⇒ 规矩：在"可能同时存在两个实例"的环境里，**清理逻辑只能管自己**，
+去重/清理别人的职责要放在"建立之前"（先删后建），不能放在"销毁之时"。**
+
+**⇒ 还有一个更通用的教训**：五个测试（126 条断言）**全绿**，但皮肤是没的 ——
+因为测试里 `AmbientBg` 的挂载/卸载时序和真实热重载不一样。
+**这次是靠 CDP 查线上 DOM 抓到的**（`磨砂: 0` 而 `enabled: true`）。
+改这种"跨实例生命周期"的东西，**必须去线上看一眼**，测试覆盖不到。
+
+### #22 半个功能：宿主那条路由从来没写过
+
+**症状**：审查时做契约核对（客户端调用的 method ↔ 宿主实现的 method），
+发现客户端每 1.2 秒 GET `/commands?since=N`，而宿主**一处都没有 "commands" 这个字**，
+`ROUTE_PATHS` 里也没有。实测 `GET /plugin/netease-music/commands` → **HTTP 404**。
+
+**后果三连**：
+1. **AI 控制播放器整套能力不存在** —— 客户端的 `runCommand` 写得很全（9 种指令），
+   但那是死代码，永远不会被执行。
+2. **每秒 0.83 次 404，一天约 7.2 万次**；`hostGet` 非 2xx 会 `throw new Error(...)`，
+   每次都要构造一个带堆栈的异常然后再被 catch 掉。
+3. **完全静默** —— `pollCommands` 的 catch 是空的（`/* host restarting etc. */`）。
+
+**这和「私人FM」是同一个病**：客户端那半齐了，宿主少一半。
+FM 是被一句 `throw` 挡住；这个是**压根没写**。
+
+**⇒ 规矩：做契约核对，别只看"客户端有没有调"。**
+把「客户端调用的 method 集合」和「宿主实现的 method 集合」做差集，一次就能看出缺口。
+（注意宿主有 `case '/x':` 和 `if (method === '/x')` 两种写法，
+**只匹配 case 会漏掉一半** —— 我第一次跑就误报了 3 个，实测算术都对。）
+
+### #23 过期响应覆盖 —— 异步返回后没确认"我还是不是当前的"
+
+**症状**（用户可感知）：快速点两首歌，**界面显示 B、耳朵听到 A**；
+切歌快时**歌词是上一首的**。
+
+**根因**：两个函数都是"await 完直接写全局状态"，没有确认当前请求是否已经过期。
+
+```js
+// playIndex
+const got = await fetchUrl(song.id, store.quality);   // 网络 100~500ms
+store.actualQuality = { songId: song.id, ... };       // ← 无条件覆盖
+a.src = url;                                          // ← 无条件覆盖
+
+// loadLyric
+const body = await api("/lyric", { id });
+store.lyrics = entry;                                 // ← 不检查当前歌还是不是 id
+```
+
+**两次请求的响应顺序是不保证的**：慢的那次回来会把新的盖掉。
+而 `store.song` 是在 await **之前**同步写好的 —— 于是 store 和 audio 脱钩。
+
+**修法**（各 3 行）：
+
+```js
+// playIndex：进函数取一个一次性令牌
+const myToken = ++playToken;
+const got = await fetchUrl(...);
+if (myToken !== playToken) return;      // 这期间用户已经点走了，丢弃这次结果
+
+// loadLyric：直接比对当前歌
+if (!store.song || String(store.song.id) !== key) return;
+```
+
+**⇒ 规矩：凡是 `await` 之后要写全局状态的地方，先问一句
+「我回来的时候，世界还是我出发时的样子吗」。** 播放器、搜索、自动加载都在这一类里。
+
+
 ### #14 换行符：仓库按 LF 存，工作区是混的 —— 这条原来写反了
 
 **原文写着「仓库里的文件全是 CRLF」，是反的。** 实测普查（33 个被追踪文件）：
@@ -735,7 +867,9 @@ node scripts/build-client.mjs
 # 语法（源码 + 产物 + 宿主 + 测试）
 node --check <file>
 
-# 三个测试
+# 测试（5 个文件，共 126 条断言）
+node test/host-selftest.mjs    # 宿主 34 条：全部路由 + AI 指令通道 + DNS rebinding 防护
+node test/ambient-selftest.mjs # 背景/皮肤 21 条
 node test/client-smoke.mjs     # 加载 factory、导出形状、挂载点、音质常量
 node test/client-apply.mjs     # 调 apply()、渲染全部 8 个子页签、作用域探针、时间线不变量
 node test/heartbeat.mjs        # 心动模式端到端：点模式按钮进心动 → 查 pid → 换来源播放 → 仍挂着
@@ -838,6 +972,24 @@ CDP 量到：33 个磨砂元素总面积 1.15M px²，**最大的两块 1000×22
 **C. 定时器只有两个，都是功能性的**
 `pollCommands` 1200ms（AI 指令轮询）、`applySkin` 3000ms（主题令牌兜底重贴，有 signature 去重）。
 
+**C2. 样式注入幂等（2026-10-17 修，别再改回去）**
+
+`DshSkin` 的 `surfaceStyleEl` / `ambientStyleEl` 原来是模块级变量 + 无条件 createElement，
+热重载后旧份留在 DOM 里 → 实测攒到 4 份。现在注入前按 `data-plugin` 清旧份，
+**4 份 → 1 份，连编两次仍然 1 份**。机制见踩坑 #21。
+
+**D. 撤掉常驻诊断（2026-10-17）**
+
+删掉了 3 个自动诊断定时器（15/30/60 秒）与 4 个诊断函数。它们每次跑都要
+`getComputedStyle` 扫全文档，而句柄不存、teardown 取消不掉 —— 热重载一次就留一批。
+诊断能力改按需：`window.__nmDiag`。
+
+**E. 轮询降频**
+
+`pollCommands` 原来无条件每 1.2 秒一次。现在页面不可见时降到 1/5（约 6 秒一次）——
+保留而不是完全停，是为了后台时 AI 指令仍能收到（最多延迟 6 秒）。
+
+
 **量不出来的事**：这个 harness 没有真正的 React 调度器、也不走真实播放链路，
 "每次 timeupdate 有几个组件重渲染"**量不出来**。我先后印过两个数字，**两个都是错的**
 （一个量的是 harness 自己手动 walk 的次数，一个打了空事件）。所以改成钉不变量。
@@ -851,6 +1003,15 @@ CDP 量到：33 个磨砂元素总面积 1.15M px²，**最大的两块 1000×22
 `apply` 的 try-catch 上报、`window.onerror` / `unhandledrejection` 监听。
 
 **已清理（别再加回来）**：
+
+**2026-10-17 又清掉一批**（一次性 DOM 诊断，它们定位过的故障都已修）：
+`reportInputDockFrost` / `reportTextDiag` / `reportBrightSurfaces` / `reportDiagAll`，
+以及 `[15000, 30000, 60000].forEach(setTimeout(reportDiagAll))` 那三个自动定时器。
+**为什么要删那三个定时器**：句柄没存，teardown 取消不掉 —— DSH 每次热重载都留一批在后台
+15~60 秒后醒来，各做一次**全量 DOM 扫描**（`getComputedStyle` 扫全部元素）。
+**诊断能力没丢**：改成按需可用，`window.__nmDiag = DshSkin`，
+需要时在 CDP 里调 `__nmDiag.explainFrost(el)` / `__nmDiag.findBrightSurfaces(10)`。
+
 `reportDomDiag` / `dumpDom` / `samplePresence` / `reportInputDock` / `reportSoon` /
 侧栏布局遥测 useEffect（每次布局一次 `getBoundingClientRect` + 一次网络 POST）。
 死图标 `IconStar`/`IconGear`/`IconExpand`/`IconClock`/`IconList`（各 0 次使用）

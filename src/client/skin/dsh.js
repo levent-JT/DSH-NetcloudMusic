@@ -83,9 +83,36 @@ const DshSkin = (() => {
       //   压暗了预览就没意义。判断标准始终是"是不是内容/重不重要"，不是"它白不白"。
     ].join("\n");
 
+    /**
+     * 摘掉 DOM 里所有带指定 data-plugin 的 <style>。
+     *
+     * 为什么需要：模块级变量（surfaceStyleEl / ambientStyleEl）在 DSH 热重载后是 null，
+     * 而上一份 <style> 还留在 head 里 —— 旧实例的 disposer 不会被可靠调用。
+     * 实测每重载一次就多一份，攒到过 4 份（等于我们的压暗/磨砂规则被重复匹配 4 次）。
+     * 所以注入前先按属性清干净，让注入变成幂等的。
+     */
+    function removeStylesByPlugin(name) {
+      let n = 0;
+      try {
+        const list = document.querySelectorAll('style[data-plugin="' + name + '"]');
+        for (const el of list) {
+          try {
+            el.remove();
+            n += 1;
+          } catch (err) {
+            /* 非致命 */
+          }
+        }
+      } catch (err) {
+        /* 非致命 */
+      }
+      return n;
+    }
+
     let surfaceStyleEl = null;
     function ensureSurfaceStyle() {
       if (surfaceStyleEl && surfaceStyleEl.isConnected) return surfaceStyleEl;
+      removeStylesByPlugin("dsh-netease-surfaces");   // 清掉热重载留下的旧份
       surfaceStyleEl = document.createElement("style");
       surfaceStyleEl.dataset.plugin = "dsh-netease-surfaces";
       surfaceStyleEl.textContent = DARK_SURFACE_CSS;
@@ -93,6 +120,12 @@ const DshSkin = (() => {
       return surfaceStyleEl;
     }
     function removeSurfaceStyle() {
+      // **只删自己手里这一份。**
+      //
+      // 曾经在这里改成"按属性删全部"，结果热重载时把新实例刚建好的那份也删了：
+      // 时序是新实例先挂载并注入、旧实例的 unmount 清理后跑 —— 于是删完就没人补
+      // （applySkin 有 signature 去重，认为自己已经应用过）。表现为皮肤整片消失。
+      // 清旧份的职责在 ensureSurfaceStyle（先删后建，天然安全），不在这里。
       if (surfaceStyleEl) {
         try {
           surfaceStyleEl.remove();
@@ -106,6 +139,7 @@ const DshSkin = (() => {
     let ambientStyleEl = null;
     function ensureAmbientStyle() {
       if (ambientStyleEl && ambientStyleEl.isConnected) return ambientStyleEl;
+      removeStylesByPlugin("dsh-netease-ambient");     // 清掉热重载留下的旧份
       ambientStyleEl = document.createElement("style");
       ambientStyleEl.dataset.plugin = "dsh-netease-ambient";
       document.head.appendChild(ambientStyleEl);

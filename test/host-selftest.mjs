@@ -207,6 +207,85 @@ ok(r.status === 403, '非 loopback 请求被拒 403', 'status=' + r.status)
 r = await rawCall('/plugin/netease-music/settings', '::ffff:127.0.0.1')
 ok(r.status === 200, 'loopback（IPv6 映射形式）仍然放行', 'status=' + r.status)
 
+// 12) AI 指令通道（/commands）。
+//
+// 这条路由以前**从来没在宿主实现过** —— 客户端每 1.2 秒拿到 404，异常被 catch 静默吞掉
+// （档案 #13「静默失败最贵」）。客户端那半一直齐着，只差宿主。这组断言钉住：
+// 能投递、能领取、领过的不重发、未知指令被拒。
+async function rawFetch(pathname, opts) {
+  const o = opts || {}
+  const payload = o.body ? [Buffer.from(JSON.stringify(o.body), 'utf8')] : []
+  return new Promise((resolve) => {
+    const req = Object.assign(Readable.from(payload), {
+      method: o.method || 'GET',
+      url: pathname,
+      socket: { remoteAddress: o.ip || '127.0.0.1' },
+      headers: o.headers || {},
+    })
+    let status = 0
+    let text = ''
+    const res = { writeHead(c) { status = c; return this }, end(ch) { if (ch) text += ch } }
+    pick(pathname)(req, res).then(() => {
+      let body = null
+      try { body = JSON.parse(text) } catch { body = { _raw: String(text).slice(0, 200) } }
+      resolve({ status, body })
+    })
+  })
+}
+
+r = await rawFetch('/plugin/netease-music/commands', { method: 'POST', body: { type: 'toggle' } })
+const postedSeq = r.body && r.body.seq
+ok(r.status === 200 && r.body && r.body.ok === true && Number(postedSeq) >= 1,
+  'POST /commands 投递一条指令并返回递增 seq', 'seq=' + postedSeq)
+
+r = await rawFetch('/plugin/netease-music/commands?since=0')
+const cmds = (r.body && r.body.commands) || []
+ok(Array.isArray(cmds) && cmds.some((c) => c.type === 'toggle'),
+  'GET /commands?since=0 能领到刚才那条', '条数=' + cmds.length)
+ok(r.body && Number(r.body.since) === Number(postedSeq),
+  'GET /commands 的 since 等于最新 seq', 'since=' + (r.body && r.body.since))
+
+r = await rawFetch('/plugin/netease-music/commands?since=' + postedSeq)
+ok(r.body && Array.isArray(r.body.commands) && r.body.commands.length === 0,
+  'GET /commands?since=<最新> 返回空（领过的不重发）', '条数=' + (r.body && r.body.commands && r.body.commands.length))
+
+r = await rawFetch('/plugin/netease-music/commands', { method: 'POST', body: { type: 'formatDisk' } })
+ok(r.body && r.body.ok === false && /未知指令/.test(String(r.body.error)),
+  'POST /commands 拒绝未知指令类型', String(r.body && r.body.error).slice(0, 60))
+
+// 12b) /state 读写分离。
+//
+// 以前 GET 也会走进"上报"分支：空 body 解析成 {} 把已存状态清空，再返回 {ok:true}。
+// 客户端上报的东西存进去了却读不出来，一读还抹掉。这里钉住写进去能读回来、且读不覆盖。
+r = await rawFetch('/plugin/netease-music/state', {
+  method: 'POST',
+  body: { song: { id: '287398', name: '测试曲' }, playing: true, playMode: 'sequence', volume: 0.8 },
+})
+ok(r.body && r.body.ok === true, 'POST /state 存入播放状态', JSON.stringify(r.body).slice(0, 60))
+
+r = await rawFetch('/plugin/netease-music/state')
+const st = r.body && r.body.state
+ok(st && st.song && String(st.song.id) === '287398' && st.playing === true,
+  'GET /state 能读回刚存的播放状态', st ? 'song=' + (st.song && st.song.name) + ' playing=' + st.playing : 'state=null')
+
+r = await rawFetch('/plugin/netease-music/state')
+ok(r.body && r.body.state && r.body.state.song && String(r.body.state.song.id) === '287398',
+  '再 GET 一次仍然读得到（读不覆盖）', '不应当被清空')
+
+// 13) DNS rebinding 防护。
+//
+// 只校验 IP 不够：恶意域名解析到 127.0.0.1 时 remoteAddress 依然是本机，
+// 但浏览器发来的 Host 是那个域名。这里钉住"带点的主机名一律拒"，
+// 同时钉住 127.0.0.1 / localhost 照常放行（只测拒绝不测放行等于半个测试）。
+r = await rawFetch('/plugin/netease-music/settings', { headers: { host: 'evil.example.com' } })
+ok(r.status === 403, 'Host 是公网域名时被拒（DNS rebinding 防护）', 'status=' + r.status)
+r = await rawFetch('/plugin/netease-music/settings', { headers: { host: 'dsh-app' } })
+ok(r.status === 200, 'Host 是无点的自定义协议名时放行', 'status=' + r.status)
+r = await rawFetch('/plugin/netease-music/settings', { headers: { host: '127.0.0.1:65362' } })
+ok(r.status === 200, 'Host 是 127.0.0.1:port 时放行', 'status=' + r.status)
+r = await rawFetch('/plugin/netease-music/settings', { headers: { host: 'localhost:65362' } })
+ok(r.status === 200, 'Host 是 localhost:port 时放行', 'status=' + r.status)
+
 console.log(results.join('\n'))
 const fails = results.filter((x) => x.startsWith('  [FAIL]')).length
 console.log('')

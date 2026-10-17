@@ -26,7 +26,6 @@
      * 那条（卡片挂载后 2.5s 发）。把这两个槽捎进遥测的 payload，诊断就不会被它盖掉 ——
      * 上一轮排查就是这么白跑的。
      */
-    let lastClientError = null;
     /**
      * 上报环。
      *
@@ -44,85 +43,6 @@
      * 从时间线上能直接看出它是从没出现过、还是出现过又消失了。
      */
 
-    /**
-     * 诊断 DSH 主页面底部那个输入框（它的类名我们够不到，用 textarea 反查）。
-     * 报回祖先链每层的尺寸/背景色/背景图/是否已磨砂/被拒理由。
-     * 只在排查输入框磨砂时用，量完就撤。
-     */
-    function reportInputDockFrost(tag) {
-      try {
-        const ta = document.querySelector("textarea");
-        if (!ta) return;
-        const wrap = ta.closest("form") || ta.parentElement || ta;
-        const info = DshSkin.explainFrost(wrap, 6);
-        reportClientError("input-frost:" + tag, { message: JSON.stringify({ tag, ...info }) });
-      } catch (e) {
-        /* 诊断失败不影响功能 */
-      }
-    }
-
-    /** 诊断：DSH 设置弹窗（role=dialog）里的文字与背景真实数值。 */
-    function reportTextDiag(tag) {
-      try {
-        const dlg = document.querySelector('[role="dialog"]') || document.querySelector('[aria-modal="true"]');
-        const info = DshSkin.explainText(dlg || document.body);
-        reportClientError("text-diag:" + tag, { message: JSON.stringify({ tag, ...info }) });
-      } catch (e) {
-        /* 诊断失败不影响功能 */
-      }
-    }
-
-    /** 诊断：把所有不透明的亮底元素报回来（找"多出来的白块"用）。 */
-    function reportBrightSurfaces(tag) {
-      try {
-        const list = DshSkin.findBrightSurfaces(24);
-        reportClientError("bright:" + tag, { message: JSON.stringify({ tag, count: list.length, list }) });
-      } catch (e) {
-        /* 诊断失败不影响功能 */
-      }
-    }
-
-    /**
-     * 一次性把**所有**排查数据合成一条上报。
-     *
-     * 为什么必须合成一条：宿主 /diag 只保留最后一条。分组定时上报的话，
-     * 晚的那组会把早的那组顶掉 —— 我为此白跑过两轮（读回来永远只有一部分）。
-     */
-    function reportDiagAll(tag) {
-      /**
-       * 每个子探针**各自** try。
-       *
-       * 教训：第一版整个包在一个 try 里，任何一个子调用抛错就**一条都不上报** ——
-       * 表现是 /diag 永远是"(客户端尚未回传)"，而我完全不知道是为什么。
-       * 现在一个坏掉，另外两个的数据照样回来，而且失败原因会随 payload 一起上报。
-       */
-      const safe = (name, fn) => {
-        try {
-          return fn();
-        } catch (e) {
-          return { __failed: name, message: String((e && e.message) || e) };
-        }
-      };
-      const dlg = safe("dialog", () => document.querySelector('[role="dialog"]') || document.querySelector('[aria-modal="true"]'));
-      const ta = safe("textarea", () => document.querySelector("textarea"));
-      const payload = {
-        tag,
-        // 先放一个"我确实跑到了"的证据，以及依赖的函数在不在
-        env: {
-          at: new Date().toISOString(),
-          hasExplainText: typeof DshSkin.explainText === "function",
-          hasFindBright: typeof DshSkin.findBrightSurfaces === "function",
-          hasExplainFrost: typeof DshSkin.explainFrost === "function",
-          hasDialog: !!(dlg && dlg.tagName),
-          hasTextarea: !!(ta && ta.tagName),
-        },
-        text: safe("text", () => DshSkin.explainText((dlg && dlg.tagName ? dlg : document.body))),
-        bright: safe("bright", () => DshSkin.findBrightSurfaces(30)),
-        inputFrost: safe("inputFrost", () => (ta && ta.tagName ? DshSkin.explainFrost(ta.closest("form") || ta.parentElement || ta, 6) : null)),
-      };
-      reportClientError("diag-all:" + tag, { message: JSON.stringify(payload) });
-    }
-
     function reportClientError(where, err) {
       try {
         const payload = {
@@ -131,10 +51,21 @@
           message: String((err && err.message) || err || "unknown"),
           stack: String((err && err.stack) || "").split("\n").slice(0, 12).join(" ⏎ "),
         };
-        lastClientError = payload;
         clientErrors.push(payload);
         if (clientErrors.length > 8) clientErrors.shift();
-        api("/diag", { data: JSON.stringify(payload) }).catch(() => {});
+        // 上报**最近 5 条**而不是单条。
+        //
+        // 为什么必须这样：宿主 /diag 只保留最后一条，而 window.onerror 是**全局**的 ——
+        // 别的插件抛错也会走到这里，把我们的记录立刻顶掉（实测就被 dsh-leetcode 的
+        // "CodeMirror.defineSimpleMode is not a function" 顶了个干净）。
+        // 带上最近 5 条后，宿主存的是"最后一批"，我们的历史不会因为别人的错误而消失。
+        const batch = clientErrors.slice(-5).map((e) => ({
+          at: e.at,
+          where: e.where,
+          message: String(e.message).slice(0, 220),
+          stack: String(e.stack || "").split("\n").slice(0, 4).join(" ⏎ "),
+        }));
+        api("/diag", { data: JSON.stringify({ entries: batch }) }).catch(() => {});
       } catch (e) {
         /* 上报失败不能影响主流程 */
       }
@@ -255,6 +186,7 @@
       clock += 1;
       for (const listener of [...listeners]) listener();
       for (const listener of [...clockListeners]) listener();
+      scheduleReport();
     }
     /** 只推进时间：不惊动订阅 useStore 的组件。 */
     function emitClock() {
@@ -277,6 +209,9 @@
       return useSyncExternalStore(subscribeClock, () => clock);
     }
     let noticeTimer = null;
+    // 播放状态上报的节流句柄。声明放在 emit() 之前，避免 TDZ ——
+    // emit() 里会引用它，而它原来是 let 声明在文件很后面的位置。
+    let reportTimer = null;
     /** 皮肤输入的订阅取消函数（teardown 里用）。 */
     let skinUnsub = null;
     /**
@@ -412,9 +347,16 @@
     function norm(song) {
       if (!song) return null;
       const artists = song.ar || song.artists || [];
-      // FM tracks carry `duration` in ms without `dt`; values > 3600 are ms.
-      const raw = song.dt || song.duration || 0;
-      const durationMs = raw > 3600 ? raw : raw * 1000;
+      // 时长单位按**字段名**判，不按数量级猜。
+      //
+      // 旧写法是 `raw > 3600 ? raw : raw * 1000`（猜：大于 3600 当毫秒）。它在一个
+      // 边界上会算错：一首**超过 1 小时**的音频若以秒给出（长播客、古典、现场），
+      // 7200 秒会被当成 7200 毫秒 → 时长变成 7.2 秒。
+      //
+      // 实测依据（档案 §2）：`/api/v1/radio/get` 的 duration 是毫秒；搜索/详情走 `dt`，
+      // 也是毫秒。所以两个字段都是毫秒 —— 唯一会出现"秒"的情况是**已被 norm 过的对象
+      // 再被 norm 一次**（那时 duration 是秒）。用 dt 是否存在来判断最准。
+      const durationMs = song.dt ? song.dt : song.duration > 3600 ? song.duration : (song.duration || 0) * 1000;
       return {
         id: String(song.id),
         name: song.name || "未知歌曲",
@@ -625,6 +567,19 @@
     }
 
     // ------------------------------------------------------------- playback
+
+    /**
+     * 「当前播放序号」。每次 playIndex 自增一次。
+     *
+     * 为什么需要：playIndex 里要 await 取直链（网络 100~500ms）。如果用户在这期间
+     * 又点了另一首，两次请求的响应回来顺序是不保证的 —— 慢的那次会把 a.src 覆盖成
+     * 上一首的地址，表现是**界面显示 B、耳朵听到 A**，而且 store.song 和 audio 脱钩。
+     *
+     * 用法：进函数时 const myToken = ++playToken；await 回来后
+     *       if (myToken !== playToken) return;   // 已经被后来的调用接管，丢弃这次结果
+     */
+    let playToken = 0;
+
     function pushHistory(song) {
       if (!song) return;
       store.history = [song, ...store.history.filter((s) => s.id !== song.id)].slice(0, 50);
@@ -654,8 +609,11 @@
       pushHistory(song);
       saveResume(0);
       loadLyric(song.id);
+      const myToken = ++playToken;
       try {
         const got = await fetchUrl(song.id, store.quality);
+        // 过期响应：这期间用户已经点走了别的歌，这次的结果必须整个丢弃
+        if (myToken !== playToken) return;
         const url = got.url;
         // 供界面显示"实际音质"。切歌时先清掉，避免上一首的档位残留显示。
         store.actualQuality = { songId: song.id, level: got.level, br: got.br };
@@ -938,6 +896,10 @@
       }
       try {
         const body = await api("/lyric", { id });
+        // 过期响应守卫：切歌快时，上一首的歌词晚到会盖到当前这首上（界面显示错歌词）。
+        // 判据用 store.song —— 和上面 playIndex 的 playToken 是同一个思路的另一种写法，
+        // 因为歌词只服务于"当前这首歌"，直接比对 id 比引一条新序号更直白。
+        if (!store.song || String(store.song.id) !== key) return;
         const lrc = (body.lrc && body.lrc.lyric) || (body.lyric && body.lyric.lyric) || "";
         // 翻译：宿主返回 tlyric，此前未使用 → 补上，背景与面板都要双语
         const tlyric = (body.tlyric && body.tlyric.lyric) || "";
@@ -1285,7 +1247,18 @@
         /* storage unavailable */
       }
     }
+    let pollSkip = 0;
     async function pollCommands() {
+      // 页面不可见时降到约 6 秒一次。
+      //
+      // 原来是无条件每 1.2 秒问一次宿主。DSH 常驻后台（用户切去别的窗口时也一样），
+      // 后台时每 1.2 秒一次的本地请求纯粹是浪费 —— 而且一旦宿主那条路由出问题，
+      // 每 1.2 秒构造一个带堆栈的 Error 代价并不小。
+      // 保留 1/5 的频率而不是完全不问，是为了后台时 AI 指令仍然能被收到（最多延迟 6 秒）。
+      if (typeof document !== "undefined" && document.hidden) {
+        pollSkip = (pollSkip + 1) % 5;
+        if (pollSkip !== 0) return;
+      }
       try {
         const res = await hostGet(`/commands?since=${lastSeq}`);
         const serverSeq = Number(res.since) || 0;
@@ -1337,7 +1310,24 @@
       }
     }
 
-    let reportTimer = null;
+    /**
+     * 把播放状态节流上报给宿主 —— 宿主 POST /state 存下来，供 AI 工具/外部查询"现在在放什么"。
+     *
+     * 为什么必须节流：一次操作里 emit() 可能连发好几次（切歌时 song / 歌词 / 实际音质
+     * 先后变化），每次都 POST 是浪费。1.5 秒内的多次变化合并成一次。
+     *
+     * 为什么以前是死的：宿主早就注册了 POST /state 并且会存下来，但客户端这个 report()
+     * **从来没被任何地方调用过** —— 于是"AI 能查播放状态"这个能力实际不存在。
+     * 现在接上 emit（只在真实状态变化时触发，不随 timeupdate 刷）。
+     */
+    function scheduleReport() {
+      if (reportTimer) return;
+      reportTimer = setTimeout(() => {
+        reportTimer = null;
+        report();
+      }, 1500);
+    }
+
     async function report() {
       try {
         await hostPost("/state", {
@@ -3009,6 +2999,10 @@
         clearTimeout(noticeTimer);
         noticeTimer = null;
       }
+      if (reportTimer !== null) {
+        clearTimeout(reportTimer);
+        reportTimer = null;
+      }
       if (docKeyHandler !== null) {
         document.removeEventListener("keydown", docKeyHandler, true);
         docKeyHandler = null;
@@ -3122,21 +3116,30 @@
           (props) => el(ViewBridge, props || {})
         )
       );
-      // 排两次：一次同步（刚注册完）、一次延迟 2.5s（等 React 提交完 + 数据拉回来）
-      // 文字对比度诊断 + 输入框磨砂诊断：DSH 的组件挂载比我们晚，多采几次。
-      // 所有诊断合成一条，只发一个时间点（放晚一点，保证它是 /diag 里最后一条）。
-      // 采三次、每条都是**完整聚合**（文字 + 亮底 + 输入框），所以谁最后到都无所谓 ——
-      // 不用再掐时间点。之前为了"保证是最后一条"只发一次，用户稍早看就什么都没有。
-      [15000, 30000, 60000].forEach((ms) => setTimeout(() => reportDiagAll("t+" + ms / 1000 + "s"), ms));
-      // 这里曾挂着一整套一次性 DOM 诊断（页签容器存在性时间线、输入框祖先链倒树），
-      // 用来定位"组件没抛错但界面空白""输入框没磨砂"那两次故障。故障都已定位并修掉，
-      // 探针撤掉；报错能力（reportClientError + 错误边界）保留。
+      // 这里曾挂着一整套一次性 DOM 诊断（页签容器时间线、输入框祖先链倒树、
+      // 文字对比度、亮底普查、15/30/60 秒的自动重采）。它们定位过三次故障，都已修掉。
+      //
+      // 2026-10-17 全部撤掉，原因有两条：
+      //   ① 那三个 setTimeout 的句柄没存，teardown 取消不掉 —— DSH 每次热重载都留一批
+      //      在后台 15~60 秒后醒来，各做一次**全量 DOM 扫描**（getComputedStyle 全元素）。
+      //   ② 与下面的报错能力重复：报错能力保留，但"主动扫描"不该常驻。
+      //
+      // 诊断**能力**没有丢：需要时在控制台/CDP 里用 window.__nmDiag（见 apply 末尾），
+      // 例如 __nmDiag.explainFrost(document.querySelector('.nm-panel'))。
       slots.inject("settings.section", () =>
         slots.register({ name: "settings.section", id: "netease-music-settings", order: 40, label: () => "网易云音乐" }, guard(SettingsView))
       );
 
+      // 诊断能力按需可用：撤掉自动扫描之后，排查时还能手动调。
+      // 例如在 CDP / 控制台里：
+      //   __nmDiag.explainFrost(document.querySelector('.nm-panel'))
+      //   __nmDiag.findBrightSurfaces(10)
+      //   __nmDiag.explainText(document.body)
+      if (typeof window !== "undefined") window.__nmDiag = DshSkin;
+
       return () => {
         teardown();
+        if (typeof window !== "undefined" && window.__nmDiag === DshSkin) delete window.__nmDiag;
         if (cssDispose) {
           cssDispose();
           cssDispose = null;
