@@ -21,6 +21,7 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
+import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -48,7 +49,17 @@ for (const name of PARTS) {
   chunks.push(text)
 }
 
-const out = HEADER + chunks.join('\n\n') + FOOTER
+const assembled = HEADER + chunks.join('\n\n') + FOOTER
+
+/**
+ * 构建指纹：把 assemble 结果的哈希写进产物，运行时可通过 window.__nmBuild 读到。
+ *
+ * 注意它**不是产物文件自身的哈希**（替换占位符后文件内容变了），而是"拼接结果"的
+ * 稳定标识 —— 同一份源码连编两次必然得到同一个值，所以「连编两次 SHA256 一致」
+ * 这条确定性检查照样成立。
+ */
+const buildId = createHash('sha256').update(assembled).digest('hex').slice(0, 10)
+const out = assembled.split('__NM_BUILD__').join(buildId)
 // 写盘前自检：产物必须是完整的「头 + 体 + 尾」。缺任何一段都说明拼接出了问题，
 // 宁可构建失败，也不要写一个半成品出去让用户看到「插件加载失败」。
 if (!out.startsWith(HEADER) || !out.endsWith(FOOTER) || !out.includes('exports.apply')) {
@@ -87,5 +98,5 @@ try { fs.unlinkSync(TMP) } catch (err) { /* 改名成功后临时文件已不存
 
 console.log(
   '[build-client] ' + PARTS.length + ' 个分片 → ' + path.relative(ROOT, OUT).replace(/\\/g, '/') +
-    '  (' + out.split('\n').length + ' 行, ' + out.length + ' 字符)'
+    '  (' + out.split('\n').length + ' 行, ' + out.length + ' 字符, build=' + buildId + ')'
 )

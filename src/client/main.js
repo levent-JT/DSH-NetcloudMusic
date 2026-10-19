@@ -12,6 +12,14 @@
     }
 
     // ================================================================ helpers
+    // 构建指纹：构建脚本会把下面这个占位符替换成"拼接结果的哈希"。
+    //
+    // 干什么用：核实"线上跑的到底是不是磁盘上这一份"。
+    // 2026-10-19 的教训很贵 —— 我改完代码以为热重载会生效，于是在**旧代码上**
+    // 验证新修复，得出"修复没生效"的假结论，白绕了四十多分钟。之后任何探针
+    // 只要读一下 window.__nmBuild，和磁盘产物的指纹对一下就能立刻分辨。
+    if (typeof window !== "undefined") window.__nmBuild = "__NM_BUILD__";
+
     const { createElement: h, useEffect, useRef, useState, useSyncExternalStore } = React;
     function el(tag, props) {
       const args = [tag, props];

@@ -522,6 +522,36 @@ const DshSkin = (() => {
       return "18px";
     }
 
+    /**
+     * 认领表：我们磨过的元素 → 当初算出来的 blur 值。
+     *
+     * 为什么需要：React 重写 className 会把我们加的 nm-frost 静默抹掉。
+     * 有了这张表才能**只针对"被抹掉的"元素**补回来（O(k)，k 约 40），
+     * 而不是每次都重扫全文档（那是 getComputedStyle 扫全部元素，很贵）。
+     */
+    const frostedBlur = new Map()
+
+    /**
+     * 极廉价的补挂：只看认领表里的元素是否丢了 nm-frost，不做任何样式查询。
+     * 顺带清理已经脱离文档的元素，避免表越积越大。
+     */
+    function reassertFrost() {
+      if (!frostedBlur.size) return 0;
+      let n = 0;
+      for (const [el, blur] of frostedBlur) {
+        if (!el.isConnected) {
+          frostedBlur.delete(el);
+          continue;
+        }
+        if (!el.classList.contains(FROST_CLASS)) {
+          el.classList.add(FROST_CLASS);
+          el.style.setProperty("--nm-blur", blur);
+          n += 1;
+        }
+      }
+      return n;
+    }
+
     function frostScan(root) {
       if (!injectedKeys.size || !document.body) return 0;
       // 收 {el, area} 而不是只收 el —— 面积在**读**这一趟就量好，
@@ -545,8 +575,11 @@ const DshSkin = (() => {
       // 而加 class 会让布局失效 —— 边读边写的话，每个元素都会强制重排一次
       // （几千个节点就是几千次重排）。先收集、后写，整趟只排一次。
       for (const hit of hits) {
+        const blur = blurForArea(hit.area);
         hit.el.classList.add(FROST_CLASS);
-        hit.el.style.setProperty("--nm-blur", blurForArea(hit.area));
+        hit.el.style.setProperty("--nm-blur", blur);
+        // 登记，供 reassertFrost / 属性观察器补挂
+        frostedBlur.set(hit.el, blur);
       }
       return hits.length;
     }
@@ -589,6 +622,24 @@ const DshSkin = (() => {
       frostObserver = new MutationObserver((records) => {
         let budget = BUDGET;
         for (const rec of records) {
+          // ── 属性变更：只处理"我们磨过、但类被抹掉了"这一种 ──
+          //
+          // 为什么必须听这个：React 更新时可能整体重写 className，把我们加的
+          // nm-frost 连同它自己的类一起写掉。那是**属性**变更，原来的观察器
+          // 只听 childList，永远唤不醒 —— 实测抹掉后等 10 秒也不恢复。
+          //
+          // 只认 frostBlur 里的元素，所以状态栏那种频繁改类的元素不会被误处理。
+          if (rec.type === "attributes") {
+            const el = rec.target;
+            if (el && el.nodeType === 1 && !el.classList.contains(FROST_CLASS)) {
+              const blur = frostedBlur.get(el);
+              if (blur !== undefined) {
+                el.classList.add(FROST_CLASS);
+                el.style.setProperty("--nm-blur", blur);
+              }
+            }
+            continue;
+          }
           for (const node of rec.addedNodes) {
             if (!node || node.nodeType !== 1) continue;
             budget -= frostScan(node);
@@ -596,7 +647,13 @@ const DshSkin = (() => {
           }
         }
       });
-      frostObserver.observe(document.body, { childList: true, subtree: true });
+      frostObserver.observe(document.body, {
+        childList: true,
+        subtree: true,
+        // 只监听 class：className 被重写是唯一会"偷走"我们标记的途径
+        attributes: true,
+        attributeFilter: ["class"],
+      });
     }
 
     function clearFrost() {
@@ -800,6 +857,9 @@ const DshSkin = (() => {
           lifts.push(name + "=" + raw + "→" + lifted);
         }
       }
+      // 兜底补挂：签名没变也要做，否则"类被抹掉"这件事永远等不到修复。
+      // 成本是 O(认领表大小)，不做任何 getComputedStyle / getBoundingClientRect。
+      reassertFrost();
       const sig =
         alpha + "|" + raws.map((p) => p[1]).join("|") + "|" + decls.length +
         (usedFallback ? "|fb" : "") + "|" + lifts.join(",");
@@ -833,6 +893,17 @@ const DshSkin = (() => {
       for (const el of document.querySelectorAll("." + FROST_CLASS)) {
         el.classList.remove(FROST_CLASS);
         el.style.removeProperty("--nm-blur");
+      }
+      // 不再"认领"这些元素：判据变了就该整体重扫，不能靠补挂把旧结论捡回来
+      frostedBlur.clear();
+      // 丢弃我们自己这批摘 class 产生的 mutation 记录 ——
+      // 否则属性观察器会在下一拍把它们又挂回去，和"判据变了要重扫"打架。
+      if (frostObserver) {
+        try {
+          frostObserver.takeRecords();
+        } catch (err) {
+          /* 非致命 */
+        }
       }
     }
 
