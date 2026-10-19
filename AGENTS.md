@@ -48,13 +48,13 @@ cache.js → lyrics.js → skin/dsh.js → skin/palette.js → skin/layers.js �
 
 ### 宿主 ↔ 客户端的契约
 
-客户端只通过 `HOST = /plugin/netease-music` 下的路径说话，宿主注册了 7 条 `kind:'exact'` 路由：
+客户端只通过 `HOST = /plugin/netease-music` 下的路径说话，宿主注册了 8 条 `kind:'exact'` 路由：
 
 ```
 /api  /settings  /status  /cookie  /logout  /restart  /state  /commands
 ```
 
-**AI 指令通道（/commands）**：这条路由**长期不存在**（见踩坑 #22）。
+**AI 指令通道（/commands）**：这条路由**长期不存在**，2026-10-17 补上（见踩坑 #22）。
 
 - `POST /commands` `{type, payload}` → 投递一条指令，返回 `{ok, seq}`；
   可用类型见宿主的 `COMMAND_TYPES`（playSong / pause / toggle / next / previous /
@@ -867,8 +867,8 @@ node scripts/build-client.mjs
 # 语法（源码 + 产物 + 宿主 + 测试）
 node --check <file>
 
-# 测试（5 个文件，共 126 条断言）
-node test/host-selftest.mjs    # 宿主 34 条：全部路由 + AI 指令通道 + DNS rebinding 防护
+# 测试（5 个文件，共 132 条断言）
+node test/host-selftest.mjs    # 宿主 37 条：全部路由 + AI 指令通道 + /state 读写 + DNS rebinding 防护
 node test/ambient-selftest.mjs # 背景/皮肤 21 条
 node test/client-smoke.mjs     # 加载 factory、导出形状、挂载点、音质常量
 node test/client-apply.mjs     # 调 apply()、渲染全部 8 个子页签、作用域探针、时间线不变量
@@ -1027,17 +1027,8 @@ CDP 量到：33 个磨砂元素总面积 1.15M px²，**最大的两块 1000×22
   根因是当年按令牌名一刀切的 `NO_FROST_NAME_RE`，`7cec71c` 删掉它时就治好了 ——
   只是这条一直挂着没销账。**教训：验证一个"疑似已修"的问题，成本是一次 CDP 查询；
   让它躺在待办里才是浪费。** `explainFrost` 的诊断能力保留。
-- **智能推荐模式（2021）没做**：种子是当前播放列表、可自由切模式、推全新歌。接口与心动模式不同。
-- **已实测可用、但还没接进插件的接口**（2026-10-16 三轮探测，真账号）：
-  相似歌曲 `/api/discovery/simiSong`（eapi，songs[]）· 相似歌单 `/api/discovery/simiPlaylist`（eapi）·
-  官方榜单 `/api/toplist`（明文，64 个榜）· 推荐歌单 `/api/v1/discovery/recommend/resource`（明文，21 个）·
-  雷达 `/api/personalized/playlist` · 收藏歌手 `/api/artist/sublist` · 收藏专辑 `/api/album/sublist`（eapi）·
-  收藏 MV `/api/mv/sublist` · 歌手详情 `/api/artist/head/info/get` · 红心全量 `/api/song/like/get`。
-  **探不通的**（明文和 eapi 都 404，是路径没找对，不是网易云没有）：
-  听歌排行 / 歌曲评论 / 最近播放 / VIP 成长 / 场景音乐。
 - **`SettingsView` 218 行**：拆分候选，但**慎动** —— 用户被我的重构炸过两次。
-- **`main.js` 仍 2800+ 行**：真要拆就按视图切（SettingsView / SidebarPlayer / PlayerView 各自自洽），风险最低。
-- **`conversation.session.header.actions` 桥接**：`Ctrl+Shift+M` 那条路径是死的。
+- **`main.js` 仍 3149 行**（CSS 模板串 377 行、纯 JS 约 2770 行）：真要拆就按视图切（SettingsView / SidebarPlayer / PlayerView 各自自洽），风险最低；CSS 外移是最无痛的一步（零风险），但会动构建管线。
 - **`DATA_DIR` 在模块加载时求值**：多 profile 的配置不独立，要改得配 Cookie 迁移。
 
 ## 9. 我自己的行为准则（血泪版）
