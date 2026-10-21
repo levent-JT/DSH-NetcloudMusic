@@ -1,4 +1,4 @@
-// 客户端 apply() + 背景图层渲染测试。
+﻿// 客户端 apply() + 背景图层渲染测试。
 //
 // 为什么需要它：原来的 client-smoke.mjs 只验证「factory 能被执行」，从不调用 apply()；
 // 而插件真正的失败点几乎都在 apply() 之后的路径上（注册 slot、挂载背景图层、
@@ -473,26 +473,56 @@ try {
   {
     const raw = fs.readFileSync(FILE, 'utf8')
 
-    // ── 启动渲染动画（boot.js）的安全性 ──────────────────────────────
+    // ── 启动渲染动画（boot.js）────────────────────────────────────────
     //
-    // 这是**唯一会覆盖整个界面**的功能，用户特别交代过"别把 DSH 拖崩"。
-    // 所以这组断言钉的不是效果，而是**不崩的保证**：
-    ok(/const BootFx = \(\(\) => \{/.test(raw), 'BootFx 是独立分片（自己建 DOM，不依赖皮肤/React）')
-    ok(/position:fixed[\s\S]{0,120}?pointer-events:none/.test(raw),
-      '根层 pointer-events:none（动画卡住时界面仍可操作）')
-    ok(/hardCap: \d+/.test(raw) && /fail\("hardcap"/.test(raw),
-      '★ 有硬超时兜底（到时强制收尾，不可能永久遮住界面）')
-    ok(/if \(typeof reportClientError === "function"\)/.test(raw),
-      '上报函数有 typeof 守卫（错误处理本身不能抛错）')
-    ok(/if \(disposed \|\| running\) return false/.test(raw),
-      'start 幂等 + dispose 后拒绝启动')
-    // 行为变过：原来"没封面就不播"，但那让**全新安装的用户永远看不到动画**
-    // （续播信息在 localStorage 里，新用户是空的）。现在改成渐变兜底。
-    // 所以要钉两件事：① 无封面也能启动 ② 仍然不阻塞主界面。
-    ok(/const hasCover = !!o\.cover;/.test(raw) && /background:linear-gradient\(/.test(raw),
-      '没封面时用渐变兜底（新安装的用户也能看到动画）')
-    ok(/cover: bootSong && bootSong\.pic \? bootSong\.pic : ""/.test(raw),
-      '调用方在无封面时传空串，而不是提前 return')
+    // 用户纠正过的核心认知："本质流程是一点点渲染主页面的不同组件，
+    // 目标是在视觉上保持一致" —— 不是自己另做一套再甩掉。
+    //
+    // 所以这组断言钉三件事：
+    //   ① 驱动的是**真实背景层**（.nm-amb），不是自造的封面
+    //   ② 逐组件动**真实 UI 元素**的 opacity/transform
+    //   ③ **完整还原**（插件卸载后 DSH 必须一尘不染）
+    ok(/function prepareAmbient\(\)/.test(raw) && /nm-amb-cover/.test(raw) && /nm-amb-lyrics/.test(raw),
+      '驱动真实背景层（封面/暗层/歌词都是页面本来就有的），不新建一套')
+    // 用户指定的顺序：头像 → 系统栏 → 输入框 → 左右侧边栏 → 历史记录
+    ok(/push\(sel1\('img\[class\*="image"\]'\)/.test(raw) && /push\(leftCol, "left"\)/.test(raw),
+      '顺序：头像→系统栏→输入框→左右侧栏→历史（左栏 dir=left）')
+    // 侧边栏要"从两边往中间"：左栏 translateX(-) 滑入、主区 translateX(+) 滑入
+    ok(/if \(dir === "left"\) return "translateX\(-"/.test(raw) && /push\(chatCol, "right"\)/.test(raw),
+      '侧栏从两边往中间（左栏向左、主区向右滑入）')
+    ok(/transitionDelay = \(i \* T\.compStep\)/.test(raw),
+      '组件按 transition-delay 错开（不靠 setTimeout，后台也不丢）')
+    // ★ 最关键：还原能力。这三条是"插件不是重构 DSH"的技术保证。
+    ok(/function remember\(el\)/.test(raw) && /el\.__nmBoot = \{/.test(raw),
+      '★ 动之前先记录原值（__nmBoot）')
+    ok(/function restoreAll\(\)/.test(raw) && /el\.style\.opacity = el\.__nmBoot\.opacity/.test(raw),
+      '★ 还原成原值（不是设成 1，是恢复记录的原值）')
+    ok(/function stop\(\)[\s\S]{0,400}?restoreAll\(\)/.test(raw) && /function dispose\(\)[\s\S]{0,120}?stop\(\)/.test(raw),
+      '★ 停止与卸载都走 restoreAll（卸载即还原）')
+    // 只碰 opacity / transform / transition，不改 class、不加全局 CSS
+       {
+         const bootStart = raw.indexOf("const BootFx = (() => {")
+         const bootSeg = bootStart >= 0 ? raw.slice(bootStart) : ""
+         ok(bootSeg.length > 1000, "能在产物里定位到 BootFx 片段", bootSeg.length + " 字符")
+         ok(!/createElement\("style"\)|document\.head\.appendChild/.test(bootSeg),
+           'Boot 不注入全局 style 标签')
+         ok(!/classList\.(add|remove|toggle)\(/.test(bootSeg),
+           'Boot 不改 DSH 的 class（只覆盖 inline 样式）')
+       }
+    // 时间轴：只要结构约束，别写死数字（用户会反复调手感）
+    {
+      const keys = ["hold", "settleAt", "settleDur", "lyricAt", "lyricDur", "compAt", "compStep", "compDur", "tailAt", "hardCap"]
+      const missing = keys.filter((k) => !new RegExp(k + ": \\d+").test(raw))
+      ok(missing.length === 0, '时间轴十个参数都在', missing.join(','))
+      const capM = /hardCap: (\d+)/.exec(raw)
+      const tailM = /tailAt: (\d+)/.exec(raw)
+      if (capM && tailM) {
+        ok(Number(capM[1]) > Number(tailM[1]), 'hardCap 晚于 tailAt（硬超时是最后保险）', capM[1] + ' > ' + tailM[1])
+      }
+    }
+      // 不能靠 hash 类名量位置（会随 DSH 版本变，且实测选错过元素）
+      ok(!/\[class\*="_header"\]\.getBoundingClientRect|\('\[class\*="_header"\]'\)/.test(raw),
+        '不用 hash 类名量顶栏（改用位置特征）')
 
     // ── 背景封面交叉淡化（2026-10-21）──────────────────────────────────
     //

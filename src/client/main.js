@@ -1,4 +1,4 @@
-    // Hot-reload guard: when this bundle is re-executed while a previous
+﻿    // Hot-reload guard: when this bundle is re-executed while a previous
     // instance of the plugin is still playing (an orphaned <audio> element),
     // stop it immediately so the old and new players never overlap.
     if (typeof window !== "undefined" && window.__nmAudio && !window.__nmAudio.paused) {
@@ -3678,6 +3678,81 @@
      *   sessionStorage 正好是这个生命周期（关掉 DSH 就清空）。
      *   热重载也不会重播（它不销毁 sessionStorage）。
      */
+    /**
+
+     * 清理历史遗留污染：早几版启动动画把 .nm-amb-cover 的 filter 设成了
+
+     * blur(0px) 却没还原，导致日常背景也一直不模糊。
+
+     *
+
+     * 这里在每次启动时检查一遍，如果发现 blur(0px) 且没有动画在跑，就清掉内联值
+
+     * 让 React 的原始 filter 生效。
+
+     */
+
+    function fixAmbientBlurPollution() {
+      // 清理历史遗留的 filter 污染。两种情况：
+      //   ① 早几版启动动画把 blur 设成 0px 没还原
+      //   ② 我上一版"清空内联 filter"的做法 —— React 只在数据变化时重设它，
+      //      清空后背景就永久不模糊了（实测 computed filter: none）
+      // 所以这里不是清空，而是**按当前设置写回正确的模糊值**。
+      try {
+        if (typeof BootFx !== "undefined" && BootFx && BootFx.isRunning && BootFx.isRunning()) return;
+        const amb = document.getElementById("nm-ambient");
+        if (!amb) return;
+        const cfg = (store.settings && store.settings.ambient) || {};
+        const blur = typeof cfg.blur === "number" ? cfg.blur : 44;
+        const sat = cfg.auto !== false ? 118 : 140;
+        const list = amb.querySelectorAll(".nm-amb-cover");
+        for (let i = 0; i < list.length; i++) {
+          const el = list[i];
+          const f = el.style.filter || "";
+          // 已经正常（blur 非 0 且非空）就别碰
+          if (f && !/blur\\(0px\\)/.test(f)) continue;
+          if (!f) {
+            // 内联被清空过：写回一套完整参数
+            el.style.filter = "blur(" + blur + "px) saturate(" + sat + "%)";
+          } else {
+            // 只有 blur 那一档被污染：换掉它，保留 saturate/brightness
+            el.style.filter = f.replace(/blur\\([^)]*\\)/g, "blur(" + blur + "px)");
+          }
+        }
+      } catch (err) { /* 清理失败不影响任何东西 */ }
+    }
+
+    /**
+     * 等背景层就绪再播启动动画。
+     *
+     * 为什么要等：applyInner 跑的时候 store.song 还没恢复，React 还没渲染
+     * .nm-amb 里的封面/暗层/歌词。而动画是"驱动这些真实元素"的，
+     * 它们不存在就没法播（实测：直接播会导致 start() 返回 false，动画完全不出现）。
+     *
+     * 轮询间隔 100ms、最多 40 次（4 秒）。超时就算了 —— 动画是装饰，
+     * 绝不为它拖住任何东西。
+     */
+    let bootWaitTimer = null;
+    function waitAmbientThenBoot(tries) {
+      if (bootWaitTimer) { clearTimeout(bootWaitTimer); bootWaitTimer = null; }
+      if (tornDown) return;
+      const t = Number(tries) || 0;
+      // 就绪标志：covers 容器 + 至少一张封面 + 歌词层（歌词可能没有，不强求）
+      const amb = document.getElementById("nm-ambient");
+      const covers = amb ? amb.querySelector(".nm-amb-covers") : null;
+      const cover = amb ? amb.querySelector(".nm-amb-cover") : null;
+      const ready = !!(amb && amb.querySelector(".nm-amb") && covers && cover);
+      if (ready) {
+        bootWaitTimer = null;
+        // 先清掉早几版留下的 blur(0px) 污染，再播
+        fixAmbientBlurPollution();
+        try { maybeStartBootFx(); } catch (err) { reportClientError("bootfx.start", err); }
+        return;
+      }
+      if (t >= 40) { bootWaitTimer = null; return; }   // 4 秒超时，放弃
+      bootWaitTimer = setTimeout(function () { waitAmbientThenBoot(t + 1); }, 100);
+    }
+
     const BOOT_PLAYED_KEY = "nm-bootfx-played";
     function maybeStartBootFx() {
       if (typeof BootFx === "undefined" || !BootFx || typeof BootFx.start !== "function") return;
@@ -3712,9 +3787,11 @@
         cover: bootSong && bootSong.pic ? bootSong.pic : "",
         title: (bootSong && bootSong.name) || "",
         artist: (bootSong && bootSong.artist) || "",
-        // 歌词这时还没请求（要等 init 之后），所以动画里不显示歌词内容。
+        // 先不带歌词：这时 store.lyrics 一定是空的（要 init 之后才请求）。
+        // 下面会异步补 —— 首次启动也能看到歌词，不用等切歌。
         lines: [],
       });
+
       if (bootOk) {
         try {
           if (window.sessionStorage) window.sessionStorage.setItem(BOOT_PLAYED_KEY, "1");
@@ -3857,8 +3934,16 @@
       //
       // 为什么 try/catch 包这么紧：动画是装饰，主界面是功能。
       // 动画出任何问题都必须变成"没播动画"，而不是"界面起不来"。
+      // 启动渲染动画。
+      //
+      // ⚠️ 不能在这里直接播 —— 实测过：这一刻 .nm-amb 里的封面/暗层/歌词
+      // 还没渲染出来（要等 init() 里的 restoreSession 给 store.song 赋值，
+      // 然后 React 才渲染背景层）。直接播会 prepareAmbient() 返回 false，
+      // 结果动画从来没开始过（CDP 查到 sessionStorage 标记一直是 null）。
+      //
+      // 所以改成"等背景层就绪再播"，最多等 4 秒。
       try {
-        maybeStartBootFx();
+        waitAmbientThenBoot(0);
       } catch (err) {
         reportClientError("bootfx.apply", err);
       }
