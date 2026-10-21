@@ -28,14 +28,45 @@ const SkinLayers = (() => {
     // 背景图层专用的 React root（见 apply 里的挂载说明）
     let bgRoot = null;
     function ensureBgLayer() {
-      if (!bgLayerEl || !document.body.contains(bgLayerEl)) {
-        bgLayerEl = document.createElement("div");
-        bgLayerEl.id = "nm-ambient";
-        bgLayerEl.style.cssText = "position:fixed;inset:0;z-index:-1;pointer-events:none;overflow:hidden;";
-        document.body.prepend(bgLayerEl);
+      // ⚠️ 先清掉历史遗留的重复背景层。
+      //
+      // 为什么会有重复：bgLayerEl 是模块级变量，DSH 热重载会重新执行 factory，
+      // 变量重置为 null，但上一轮建的 DOM 还挂在 body 上 —— 每热重载一次多一份。
+      // 实测累积到 12 份，每份都是全屏 blur(44px) 的封面：纯性能浪费，
+      // 而且启动动画做"背景交接"时无法判断该露出哪一层。
+      //
+      // 策略：**绝不碰正在工作的那个**（bgLayerEl 指向且在 DOM 里），其余全删。
+      const all = document.querySelectorAll("#nm-ambient");
+      if (all.length) {
+        const live = bgLayerEl && document.body.contains(bgLayerEl) ? bgLayerEl : null;
+        let removed = 0;
+        for (let i = all.length - 1; i >= 0; i--) {
+          const n = all[i];
+          if (live && n === live) continue; // 正在用的，跳过
+          try {
+            if (n.__nmRoot && typeof n.__nmRoot.unmount === "function") n.__nmRoot.unmount();
+          } catch (err) {
+            /* root 卸载失败也要继续删，否则清不掉 */
+          }
+          if (n.parentNode) { n.parentNode.removeChild(n); removed++; }
+        }
+        if (removed) reportClientError("ambient.dedup", new Error("清掉 " + removed + " 个重复背景层"));
+        // 只剩一个了：如果变量是空的（刚热重载），就接手指针到现存那个
+        if (!bgLayerEl) {
+          const kept = document.querySelector("#nm-ambient");
+          if (kept) bgLayerEl = kept;
+        }
+      }
+      if (bgLayerEl && document.body.contains(bgLayerEl)) {
+        DshSkin.setBackgroundLayer(bgLayerEl);
+        return bgLayerEl;
+      }
+      bgLayerEl = document.createElement("div");
+      bgLayerEl.id = "nm-ambient";
+      bgLayerEl.style.cssText = "position:fixed;inset:0;z-index:-1;pointer-events:none;overflow:hidden;";
+      document.body.prepend(bgLayerEl);
       // 登记给皮肤层：「别把我们自己的背景图层也磨砂了」这条判断要用它。
       DshSkin.setBackgroundLayer(bgLayerEl);
-      }
       return bgLayerEl;
     }
     // ── DSH 皮肤接缝（实现在 src/client/skin/dsh.js）────────────────────
@@ -506,6 +537,8 @@ const [slots, setSlots] = useState(function () {
           onRecoverableError: (e) => reportClientError("ambient.recoverable", e),
         };
         bgRoot = ReactDOM.createRoot(layer, rootOpts);
+        // 记在 DOM 上：去重时能先卸载它，避免 React 在已移除的节点上继续更新
+        layer.__nmRoot = bgRoot;
         bgRoot.render(el(BgErrorBoundary, {}, el(AmbientBg, {})));
       } else if (typeof ReactDOM.render === "function") {
         ReactDOM.render(el(BgErrorBoundary, {}, el(AmbientBg, {})), layer);

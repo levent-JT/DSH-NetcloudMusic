@@ -34,7 +34,7 @@ const TMP = OUT + '.tmp'
  * 拼接顺序 = 依赖顺序：后面的分片可以使用前面分片定义的命名空间。
  * 顺序写死在这里，不用 readdir —— 目录顺序不可控，而加载顺序是有语义的。
  */
-const PARTS = ['cache.js', 'lyrics.js', 'skin/dsh.js', 'skin/palette.js', 'skin/layers.js', 'main.js']
+const PARTS = ['cache.js', 'lyrics.js', 'skin/dsh.js', 'skin/palette.js', 'skin/layers.js', 'main.js', 'boot.js']
 
 const HEADER = "window.__ModuleLoader__.load({\r\n  id: \"dsh-netease-music\",\r\n  factory: (require) => {\r\n    var module = { exports: {} };\r\n    var exports = module.exports;\r\n    Object.defineProperty(exports, Symbol.toStringTag, { value: \"Module\" });\r\n    var React = require(\"react\");\r\n    var ReactDOM = require(\"react-dom\");\r\n\r\n"
 // 尾部开头必须是**一个空行**：分片末尾的换行会在拼接前被裁掉，

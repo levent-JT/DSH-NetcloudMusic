@@ -473,6 +473,27 @@ try {
   {
     const raw = fs.readFileSync(FILE, 'utf8')
 
+    // ── 启动渲染动画（boot.js）的安全性 ──────────────────────────────
+    //
+    // 这是**唯一会覆盖整个界面**的功能，用户特别交代过"别把 DSH 拖崩"。
+    // 所以这组断言钉的不是效果，而是**不崩的保证**：
+    ok(/const BootFx = \(\(\) => \{/.test(raw), 'BootFx 是独立分片（自己建 DOM，不依赖皮肤/React）')
+    ok(/position:fixed[\s\S]{0,120}?pointer-events:none/.test(raw),
+      '根层 pointer-events:none（动画卡住时界面仍可操作）')
+    ok(/hardCap: \d+/.test(raw) && /fail\("hardcap"/.test(raw),
+      '★ 有硬超时兜底（到时强制收尾，不可能永久遮住界面）')
+    ok(/if \(typeof reportClientError === "function"\)/.test(raw),
+      '上报函数有 typeof 守卫（错误处理本身不能抛错）')
+    ok(/if \(disposed \|\| running\) return false/.test(raw),
+      'start 幂等 + dispose 后拒绝启动')
+    // 行为变过：原来"没封面就不播"，但那让**全新安装的用户永远看不到动画**
+    // （续播信息在 localStorage 里，新用户是空的）。现在改成渐变兜底。
+    // 所以要钉两件事：① 无封面也能启动 ② 仍然不阻塞主界面。
+    ok(/const hasCover = !!o\.cover;/.test(raw) && /background:linear-gradient\(/.test(raw),
+      '没封面时用渐变兜底（新安装的用户也能看到动画）')
+    ok(/cover: bootSong && bootSong\.pic \? bootSong\.pic : ""/.test(raw),
+      '调用方在无封面时传空串，而不是提前 return')
+
     // ── 背景封面交叉淡化（2026-10-21）──────────────────────────────────
     //
     // 用户要求：切歌时旧封面渐隐、新封面渐显（800~1200ms），

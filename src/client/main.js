@@ -3665,6 +3665,63 @@
       }
     }
 
+    /**
+     * 启动渲染动画。**只在真正需要时播**，并且绝不阻塞任何东西。
+     *
+     * 判定顺序（任何一步不满足就安静地不播）：
+     *   1. 设置里 boot 开关不是 false（默认开）
+     *   2. 这一轮 DSH 会话还没播过（同一次启动只播一次，刷新页面不重播）
+     *   3. 有封面（从 localStorage 的续播信息里读；没有就跳过）
+     *
+     * 为什么用 sessionStorage 而不是 localStorage：
+     *   用户要求"每次启动都播"，但同一次启动里刷新页面不该重播 ——
+     *   sessionStorage 正好是这个生命周期（关掉 DSH 就清空）。
+     *   热重载也不会重播（它不销毁 sessionStorage）。
+     */
+    const BOOT_PLAYED_KEY = "nm-bootfx-played";
+    function maybeStartBootFx() {
+      if (typeof BootFx === "undefined" || !BootFx || typeof BootFx.start !== "function") return;
+      // 开关：设置还没拉回来时先按默认值（true）走；拉了之后如果被关掉，
+      // dispose 会在设置应用时被调用（见 pushSkin/设置同步那条路）。
+      const cfg = (store.settings && store.settings.ambient) || {};
+      if (cfg.boot === false) return;
+      // 同一次启动只播一次
+      try {
+        if (window.sessionStorage && window.sessionStorage.getItem(BOOT_PLAYED_KEY) === "1") return;
+      } catch (err) {
+        /* 隐私模式可能禁用 sessionStorage：那就每次都播，不影响功能 */
+      }
+      // 从续播信息里拿封面（同步、不依赖网络）。
+      //
+      // ⚠️ 拿不到也**照样播** —— 传空封面，BootFx 会用渐变兜底。
+      // 原因：全新安装 / 没播过歌 / 清了浏览器数据的用户，这里永远是空的。
+      // 如果因此 return，这个功能对他们等于不存在（只有老用户能看到）。
+      let bootSong = null;
+      try {
+        const raw = localStorage.getItem(RESUME_KEY);
+        const resume = raw ? JSON.parse(raw) : null;
+        if (resume && Array.isArray(resume.queue) && resume.queue.length) {
+          const ri = Number(resume.index);
+          bootSong = resume.queue[ri >= 0 && ri < resume.queue.length ? ri : 0] || null;
+        }
+      } catch (err) {
+        bootSong = null;
+      }
+
+      const bootOk = BootFx.start({
+        cover: bootSong && bootSong.pic ? bootSong.pic : "",
+        title: (bootSong && bootSong.name) || "",
+        artist: (bootSong && bootSong.artist) || "",
+        // 歌词这时还没请求（要等 init 之后），所以动画里不显示歌词内容。
+        lines: [],
+      });
+      if (bootOk) {
+        try {
+          if (window.sessionStorage) window.sessionStorage.setItem(BOOT_PLAYED_KEY, "1");
+        } catch (err) { /* 存不进去也不影响播放 */ }
+      }
+    }
+
     let pollTimer = null;
     let cssDispose = null;
     let docKeyHandler = null;
@@ -3732,6 +3789,13 @@
       }
       DshSkin.clearSkin();
       SkinLayers.unmount();
+      // 启动动画：卸载插件时必须清掉它可能留在 body 上的层与定时器。
+      // BootFx.dispose() 是幂等的，且自己会按 id 清所有残留 —— 这里不重复实现清理逻辑。
+      try {
+        if (typeof BootFx !== "undefined" && BootFx && typeof BootFx.dispose === "function") BootFx.dispose();
+      } catch (err) {
+        reportClientError("bootfx.dispose", err);
+      }
       if (skinUnsub) {
         skinUnsub();
         skinUnsub = null;
@@ -3784,6 +3848,21 @@
       pushSkin();
       skinUnsub = subscribe(pushSkin);
       skinClockUnsub = subscribeClock(pushSkin);
+      // ── 启动渲染动画 ──────────────────────────────────────────────────
+      //
+      // 放在 init() 之前：init 要等宿主设置回来（网络），而动画应该在
+      // "用户看到界面"的第一时间就开始，不该被设置请求挡住。
+      // 所以这里**先用同步能拿到的东西**（localStorage 里的续播信息）启动，
+      // 拿不到就不播 —— 绝不阻塞主界面。
+      //
+      // 为什么 try/catch 包这么紧：动画是装饰，主界面是功能。
+      // 动画出任何问题都必须变成"没播动画"，而不是"界面起不来"。
+      try {
+        maybeStartBootFx();
+      } catch (err) {
+        reportClientError("bootfx.apply", err);
+      }
+
       const slots = ctx.slots;
       init();
 
