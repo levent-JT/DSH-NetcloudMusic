@@ -670,6 +670,42 @@
      * 用法：进函数时 const myToken = ++playToken；await 回来后
      *       if (myToken !== playToken) return;   // 已经被后来的调用接管，丢弃这次结果
      */
+    // ── 进度条拖拽状态 ──────────────────────────────────────────
+    // 拖动时只更新显示，松手才 seek。
+    // 原来的 onChange 在拖动过程中会连续触发，每次设 currentTime
+    // 都会打断解码 → 卡顿、声音断续。分开之后拖动很顺。
+    //
+    // 为什么用独立的订阅线而不是 emit()：进度条的拖动只影响两个组件，
+    // 走主 emit 会让 19 个组件连带重渲染，拖动时反而更卡。
+    let seekDragging = false;
+    let seekValue = 0;
+    let seekTick = 0;
+    const seekListeners = [];
+    function setSeekDrag(dragging, v) {
+      seekDragging = !!dragging;
+      seekValue = Number(v) || 0;
+      seekTick++;
+      const list = seekListeners.slice();
+      for (let i = 0; i < list.length; i++) {
+        try { list[i](); } catch (err) {}
+      }
+    }
+    function subscribeSeek(fn) {
+      seekListeners.push(fn);
+      return function () {
+        const i = seekListeners.indexOf(fn);
+        if (i >= 0) seekListeners.splice(i, 1);
+      };
+    }
+    /** 订阅拖拽状态。返回 { dragging, value }。 */
+    function useSeek() {
+      const [, force] = useState(0);
+      useEffect(function () {
+        return subscribeSeek(function () { force(function (n) { return n + 1; }); });
+      }, []);
+      return { dragging: seekDragging, value: seekValue };
+    }
+
     let playToken = 0;
 
     function pushHistory(song) {
@@ -719,10 +755,30 @@
           }
         }
         try {
-          await a.play();
+          // 超时保护：play() 在网络差 / 解码卡住时可能永远不 resolve。
+          // 那会让界面一直停在"正在加载"，用户感觉就是"切歌卡住"。
+          // 这里加 8 秒上限，超时当作失败处理（可以再点播放重试）。
+          const PLAY_TIMEOUT_MS = 8000;
+          let playTimer = null;
+          let playTimedOut = false;
+          const timeoutPromise = new Promise(function (_, reject) {
+            playTimer = setTimeout(function () {
+              playTimedOut = true;
+              reject(new Error("play() timeout"));
+            }, PLAY_TIMEOUT_MS);
+          });
+          try {
+            await Promise.race([a.play(), timeoutPromise]);
+          } finally {
+            if (playTimer) clearTimeout(playTimer);
+          }
+          if (playTimedOut) throw new Error("play() timeout");
         } catch (err) {
           store.playing = false;
-          setNotice("浏览器阻止了自动播放，请点击播放按钮");
+          const isTimeout = err && /timeout/i.test(String(err.message || ""));
+          setNotice(isTimeout
+            ? "播放超时（网络或解码卡住），点播放可重试"
+            : "浏览器阻止了自动播放，请点击播放按钮");
           emit();
         }
       } catch (err) {
@@ -2361,6 +2417,7 @@
     }
 
     function PlayerBar() {
+      const seek = useSeek();
       useStore();
       useClock(); // 需要时间/进度
       const song = store.song;
@@ -2389,7 +2446,16 @@
           LikeButton({ song })),
         el("div", { className: "nm-playerbar-progress" },
           el("span", { className: "nm-time" }, fmtTime(cur)),
-          el("input", { type: "range", className: "nm-range", min: 0, max: Math.max(dur, 1), step: 1, value: Math.min(cur, dur), onChange: (e) => { if (audio) audio.currentTime = Number(e.target.value); } }),
+          el("input", {
+            type: "range", className: "nm-range", min: 0, max: Math.max(dur, 1), step: 1,
+            value: seek.dragging ? seek.value : Math.min(cur, dur),
+            onInput: (e) => setSeekDrag(true, Number(e.target.value)),
+            onChange: (e) => {
+              const v = Number(e.target.value);
+              if (audio) { try { audio.currentTime = v; } catch (err) {} }
+              setSeekDrag(false, 0);
+            },
+          }),
           el("span", { className: "nm-time" }, fmtTime(dur))),
         store.modules.volume
           ? el("div", { className: "nm-playerbar-volume" },
@@ -2539,6 +2605,7 @@
      * 中列永远在正中，左右两侧放什么都不影响它。
      */
     function PlayerView() {
+      const seek = useSeek();
       useStore();
       useClock(); // 需要时间/进度
       // hooks 必须无条件调用，所以放在"没有歌"的早退之前
@@ -2722,9 +2789,15 @@
                 min: 0,
                 max: Math.max(dur, 1),
                 step: 1,
-                value: Math.min(cur, dur),
+                value: seek.dragging ? seek.value : Math.min(cur, dur),
+                // onInput 只记值（拖动中，不 seek），onChange（松手）才真的跳。
+                // 原来 onChange 里直接设 currentTime，而它在拖动时会连续触发 ——
+                // 每次 seek 都打断解码，听感就是卡顿、断续。
+                onInput: (e) => setSeekDrag(true, Number(e.target.value)),
                 onChange: (e) => {
-                  if (audio) audio.currentTime = Number(e.target.value);
+                  const v = Number(e.target.value);
+                  if (audio) { try { audio.currentTime = v; } catch (err) {} }
+                  setSeekDrag(false, 0);
                 },
               })),
             el("div", { className: "nm-pl-times" }, el("span", null, fmtTime(cur)), el("span", null, fmtTime(dur)))
@@ -2934,6 +3007,7 @@
     }
 
     function SidebarPlayer() {
+      const seek = useSeek();
       useStore();
       useClock(); // 需要时间/进度
       const song = store.song;
@@ -3018,7 +3092,13 @@
             value: Math.min(cur, dur),
             disabled: !song,
             title: "拖动定位",
-            onChange: (e) => { if (audio) audio.currentTime = Number(e.target.value); },
+            value: seek.dragging ? seek.value : Math.min(cur, dur),
+            onInput: (e) => setSeekDrag(true, Number(e.target.value)),
+            onChange: (e) => {
+              const v = Number(e.target.value);
+              if (audio) { try { audio.currentTime = v; } catch (err) {} }
+              setSeekDrag(false, 0);
+            },
           })));
     }
 
@@ -3321,7 +3401,13 @@
    当前行最大最亮，相邻行按距离淡出——单栏、只有一个视觉焦点。
    原来的歌词是右侧小字，与左侧主体构成两栏，视线要来回跳，"排列不好看"就是这个原因。
    字号由 SkinLayers 的 AmbientBg 内联下发（沉浸式用 clamp 跟窗口高度走）。 */
-.nm-amb-lyrics-c{left:50%;right:auto;transform:translate(-50%,-50%);width:min(74vw,960px);text-align:center}
+/* 沉浸式样式的排版微调。
+   ⚠️ **不要在这里写 position/left/right/top/bottom/transform/margin** ——
+   基础规则 .nm-amb-lyrics 定义在本条之后、优先级相同，所以基础类会赢，
+   这里写了也不会生效，反而容易让人误以为"沉浸式是居中的"。
+   实测过一次：把它改成居中+flex，确实居中了，但那是**改掉了用户一直看到的靠右**。
+   所以这里只管字号/行距/对齐这类真正生效的东西。 */
+.nm-amb-lyrics-c{width:min(74vw,960px);max-height:70vh;overflow:hidden}
 .nm-amb-lyrics-c .nm-amb-line{margin:9px 0}
 /* 沉浸式的当前行是整层背景的最亮点（实测峰值 0.76），而文字对比度只看最亮处，
    所以它必须比其他元素更克制 —— 降到 .62 之后峰值落到 ~0.36，
