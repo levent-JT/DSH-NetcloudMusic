@@ -19,9 +19,18 @@ const LruCache = (() => {
    */
   function create(max) {
     const map = new Map();
+    // 上限可变：设置页允许用户改"缓存的页面上限"，改完要立刻生效而不是等重建。
+    let limit = Math.max(0, Number(max) || 0);
+    const evict = () => {
+      // 上限 0 表示"不缓存"：全部清掉（而不是无限增长）。
+      while (map.size > limit) map.delete(map.keys().next().value);
+    };
     return {
       get size() {
         return map.size;
+      },
+      get max() {
+        return limit;
       },
       has: (k) => map.has(k),
       get(k) {
@@ -33,12 +42,18 @@ const LruCache = (() => {
         return v;
       },
       set(k, v) {
+        if (limit <= 0) return; // 不缓存模式：直接丢
         if (map.has(k)) map.delete(k);
         map.set(k, v);
-        while (map.size > max) map.delete(map.keys().next().value);
+        evict();
       },
       delete: (k) => map.delete(k),
       clear: () => map.clear(),
+      /** 改上限：调小立即淘汰最久未使用的，调大只改上限。 */
+      resize(n) {
+        limit = Math.max(0, Number(n) || 0);
+        evict();
+      },
     };
   }
   return { create };

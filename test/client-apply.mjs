@@ -472,6 +472,41 @@ try {
   // 不如把不变量钉死 —— 它们是这次性能改动真正的内容。
   {
     const raw = fs.readFileSync(FILE, 'utf8')
+
+    // ── 门控不会永久卡在骨架（2026-10-21，踩坑 #33）─────────────────────
+    //
+    // 事故：restoreSession() 恢复会话时只赋 store.song，**从不请求歌词**。
+    // 门控当时判的是 store.lyrics !== null，于是"上次退出时在听歌 → 这次打开播放器页"
+    // 永久停在骨架，永远不渲染（用户截图报的）。
+    //
+    // 教训不是"忘了调 loadLyric"，而是**门控依赖了一个可能永远不变的状态**。
+    // 三层一起钉住，缺一层都可能重演：
+    //   ① 判据改成"落定(done)"，不是"非 null"
+    //   ② 每个出口都要落定（含请求失败、歌词模块关闭）
+    //   ③ 硬超时兜底 —— 将来冒出新路径，最坏也只是慢 1.2 秒，不会白屏
+    ok(/store\.lyricState === "done"/.test(raw) && /store\.lyrics !== null \|\|/.test(raw),
+      '门控判据是"歌词已落定"，不是"歌词非 null"')
+    ok(/function settleLyric\(id\)/.test(raw),
+      '有 settleLyric：拿到 / 失败 / 关模块都要落定')
+    if (true) {
+      const outs = [
+        /if \(!store\.modules\.lyrics\) \{ settleLyric\(id\); return; \}/,
+        /store\.lyrics = hit; settleLyric\(id\);/,
+        /store\.lyrics = entry; settleLyric\(id\);/,
+        /store\.lyrics = null; settleLyric\(id\);/,
+      ]
+      const miss = outs.filter((re) => !re.test(raw)).length
+      ok(miss === 0, 'loadLyric 的 4 个出口都会落定', miss ? '缺 ' + miss + ' 处' : '齐全')
+    }
+      ok(/const GATE_TIMEOUT_MS = \d+;/.test(raw) && /function gateTimedOut\(songKey\)/.test(raw),
+        '有硬超时兜底的常量与判断函数')
+      // ⚠️ 上面那条只证明"东西存在"，不证明"它真的被用了" —— 我第一版就写成这样，
+      // 结果把 gateTimedOut 从 ready 判定里整个删掉，测试照样全绿（假测试）。
+      // 下面这条才是真正钉住兜底的：
+      ok(/const ready = \(coverOk && lyricDone\) \|\| gateTimedOut\(songKey\);/.test(raw),
+        '★ 硬超时兜底真的用在 ready 判定里（不是定义了却没用）')
+      ok(/function restoreSession\(\)[\s\S]{0,1200}?loadLyric\(store\.song\.id\);/.test(raw),
+        '恢复会话时也会请求歌词（本次事故的直接根因）')
     ok(/function emitClock()/.test(raw), '存在轻量时间线 emitClock')
     ok(/function useClock()/.test(raw), '存在 useClock')
 
@@ -495,6 +530,61 @@ try {
     // 只有真的显示时间/进度的组件订阅时钟
     const clockUsers = (raw.match(/useClock\(\)/g) || []).length
     ok(clockUsers >= 4 && clockUsers <= 6, '订阅时钟的组件数量收敛（4~6 个，不是全部）', '实测 ' + clockUsers + ' 个（含定义 1 处）')
+    // ── 每日推荐「换天刷新」的结构约束（方案 A：只在进推荐页时检查）──
+    //
+    // 为什么用静态断言而不是驱动行为：判据 dailyFetchedDay 是 factory 内部变量，
+    // 从沙箱外面驱动不了（要驱动就得为测试开口子，反而更脏）。
+    // 这一组钉"结构还在"，配合线上验证用。
+    ok(/function todayIndex\(\)/.test(raw), '有本地日期工具 todayIndex')
+    ok(/function refreshDailyIfStale\(\)/.test(raw), '有换天检查函数 refreshDailyIfStale')
+    ok(/refreshDailyIfStale\(\);/.test(raw), '进推荐页时会调用它（不再是"列表非空就永不刷新"）')
+    ok(/dailyFetchedDay = todayIndex\(\)/.test(raw), '成功拿到日推后记住是哪一天')
+    ok(/const before = store\.dailySongs\.map/.test(raw), '静默刷新会比较新旧列表内容')
+    ok(/DAILY_RETRY_MAX/.test(raw), '被共用闸挡住时有界重试，不会静默丢一次刷新')
+    ok(/clearTimeout\(dailyRetryTimer\)/.test(raw), 'teardown 里清掉了重试闹钟')
+    // ── 播放器页改版的结构约束（2026-10-20）──
+    //
+    // 这里钉的是那次"排版 bug"的修法：老版本把模式按钮和传输控制放进同一个 flex 行，
+    // 整组 align-items:center 之后播放键被顶偏约 20px。新布局用 grid 的
+    // 1fr auto 1fr —— 中列永远是正中。**这一条如果被改回 flex，断言必须报红。**
+    ok(/\.nm-pl-ctl\{display:grid;grid-template-columns:1fr auto 1fr/.test(raw),
+      '播放键永远在正中（三分格中列，不是 flex 整组居中）')
+    ok(/\.nm-pl-side\.nm-pl-left/.test(raw) || /nm-pl-side nm-pl-left/.test(raw),
+      '左侧区块单独成列（模式按钮不再挤进传输行）')
+    {
+      // 用户明确要求：**每次打开播放器都要完整走一遍入场**。
+      // 所以现在只有两档：挂载 → full；换歌 → song。
+      // 这条断言钉的是"别再冒出第三档（light）把入场悄悄关掉"。
+      ok(raw.indexOf('.nm-ent-full') > 0 && raw.indexOf('.nm-ent-song') > 0,
+        '两档入场都有 CSS（每次挂载 full / 换歌 song）')
+      ok(raw.indexOf('nm-ent-light') < 0, '没有 light 档（用户要求每次打开都完整播放）')
+      ok(raw.indexOf('playerAnimSong') > 0, '换歌判据用内存标记 playerAnimSong')
+      ok(/changingSong\s*\?\s*"nm-ent-song"\s*:\s*"nm-ent-full"/.test(raw),
+        '档位判据：换歌走 song，其余（含切页签回来）走 full')
+    }
+    ok(/prefers-reduced-motion/.test(raw), '尊重系统"减少动态效果"设置')
+    ok(/shownRef/.test(raw) && /const view = shownRef\.current/.test(raw),
+      '切歌时保留上一屏（新歌没就绪就继续画旧快照，画面不跳）')
+    ok(/function snapshot\(s\)/.test(raw) && /current: cur0/.test(raw),
+      '快照冻结了歌词当前行（否则切歌后旧歌词会跳回第一行）')
+    ok(/const ctlSong = vs \|\| song/.test(raw),
+      '控件跟画面那一首走（避免"看到 A 却收藏了 B"）')
+    ok(/function applyCacheLimits\(\)/.test(raw) && /urlCache\.resize/.test(raw) && /lyricCache\.resize/.test(raw),
+      '三套客户端缓存的上限可由设置控制')
+    ok(/setClientLimit/.test(raw), '设置页能改缓存上限且立即生效')
+
+    ok(/nm-pl-ch/.test(raw) && /overflow:hidden/.test(raw), '标题逐字用裁切窗口实现')
+
+    {
+      // bundle 里本来就有 2 个定时器：applySkin 的 3 秒兜底重贴、pollCommands 的 1.2 秒轮询。
+      // 换天刷新**一个都不许加**（用户明确要求"对性能影响最小"）。
+      const timers = (raw.match(/setInterval\(/g) || []).length
+      ok(timers === 2, '定时器仍是已知的 2 个，换天刷新没新增', '实际 ' + timers + ' 处')
+      const seg = raw.slice(raw.indexOf('function refreshDailyIfStale'), raw.indexOf('async function loadDaily'))
+      ok(seg.length > 100 && !/setInterval/.test(seg), '换天刷新那段里没有任何 setInterval', '段长 ' + seg.length)
+      ok(!/addEventListener/.test(seg), '换天刷新那段里没有任何 addEventListener')
+      ok(/setTimeout/.test(seg), '被共用闸挡住时用 setTimeout 有界重试')
+    }
   }
 
   // ── 渲染每个注册的组件（播放器标签、侧栏卡片、设置页）──────────────

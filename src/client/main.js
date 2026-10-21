@@ -137,6 +137,12 @@
       // 这里原来还挂了一个 store.ambient 默认对象，但从来没人读它，
       // 属于会误导后来人的死代码，已删除。
       lyrics: null,
+      lyrics: null,
+      // 歌词「落定」状态：idle 没请求过 / loading 请求中 / done 有结果了（含失败、纯音乐、模块关闭）。
+      // 为什么不能只看 lyrics !== null：模块关闭、请求失败、以及"恢复了会话但从不请求"
+      // 这三条路径下 lyrics 会**永远是 null** —— 拿它当门控条件就会永久卡住（踩坑 #33）。
+      lyricSong: null, // 当前这轮的歌词属于哪首歌（string）
+      lyricState: "idle",
       // 缓存统计（音质探测缓存由宿主持有，所以要问它拿数字）。null = 还没问过。
       cacheStats: null,
       time: 0,
@@ -384,16 +390,94 @@
      *
      * 返回 { url, level, br }。level 用网易云报的（才是真的），调用方可以显示。
      */
-    async function fetchUrl(id, level) {
+    // ── 播放地址缓存 ──────────────────────────────────────────
+    // 只按 songId 缓存；直链会过期，所以 audio 的 error 事件里会 forgetUrl(id) 重取。
+    // 它的价值主要在"预取过的歌切过去不用等网络"。
+    /**
+     * 把设置里的客户端缓存上限应用到三套缓存上。
+     *
+     * 什么时候调：启动拿到 /settings 之后、设置页改了之后（立即生效）、
+     * 以及收到设置变更时（别的窗口改的也能同步）。
+     */
+    function applyCacheLimits() {
+      const c = (store.settings && store.settings.cache) || {};
+      const lim = c.clientLimits || {};
+      const pick = function (v, dflt) {
+        const n = Number(v);
+        return Number.isFinite(n) && n >= 0 ? n : dflt;
+      };
+      urlCache.resize(pick(lim.url, 12));
+      lyricCache.resize(pick(lim.lyric, 40));
+      if (SkinPalette && typeof SkinPalette.setCacheLimit === "function") {
+        SkinPalette.setCacheLimit(pick(lim.cover, 300));
+      }
+    }
+
+    const URL_CACHE_MAX = 12;
+    const urlCache = LruCache.create(URL_CACHE_MAX);
+    function urlKey(id, level) {
+      return String(id) + "|" + String(level || "");
+    }
+    function forgetUrl(id) {
+      // LruCache 没有 keys()，但档位只有 7 个 —— 按档位扫，不依赖内部实现。
+      for (const lv of QUALITY_LEVELS) urlCache.delete(urlKey(id, lv));
+    }
+
+    // 预取：只取 URL，不碰 audio；失败静默（预取本来就是可选优化）
+    let prefetching = null;
+    let prefetchTimer = null;
+    function prefetchSong(song) {
+      if (!song || !song.id) return;
+      const key = urlKey(song.id, store.quality);
+      if (urlCache.get(key)) return;
+      if (prefetching === key) return;
+      prefetching = key;
+      fetchUrlRaw(song.id, store.quality)
+        .then(function (got) {
+          if (got && got.url) urlCache.set(key, got);
+        })
+        .catch(function () {})
+        .then(function () {
+          if (prefetching === key) prefetching = null;
+        });
+    }
+
+    /** 队列里的"下一首"（按播放模式）。随机模式不预取 —— 猜谁都是浪费一次请求。 */
+    function peekNext() {
+      const n = store.queue.length;
+      if (!n) return null;
+      if (store.mode === "shuffle") return null;
+      if (store.mode === "single") return store.queue[store.index] || null;
+      if (store.index + 1 < n) return store.queue[store.index + 1];
+      if (store.mode === "loop") return store.queue[0] || null;
+      return null;
+    }
+
+    /** 真正发请求的那层（不带缓存）。档位回退也走它，避免缓存互相污染。 */
+    async function fetchUrlRaw(id, level) {
       const body = await api("/song/url/v1", { id, level });
       const item = body.data && body.data[0];
       const url = item && item.url;
       const actual = item ? { level: item.level || "", br: item.br || 0 } : { level: "", br: 0 };
       // auto 无需再退档：宿主内部已经按 jymaster→exhigh→standard 探过了
-      if (!url && level !== "standard" && level !== "auto") return fetchUrl(id, "standard");
-      if (!url) return { url: `https://music.163.com/song/media/outer/url?id=${id}.mp3`, level: actual.level, br: actual.br };
+      if (!url && level !== "standard" && level !== "auto") return fetchUrlRaw(id, "standard");
+      if (!url) return { url: "https://music.163.com/song/media/outer/url?id=" + id + ".mp3", level: actual.level, br: actual.br };
       return { url, level: actual.level, br: actual.br };
     }
+
+    /**
+     * 取播放地址（带缓存）。缓存命中立刻返回 —— 预取过的歌切过去不用等网络。
+     * 只缓存真的拿到 url 的结果（兜底的 outer/url 也缓存，它是稳定可用的）。
+     */
+    async function fetchUrl(id, level) {
+      const key = urlKey(id, level);
+      const hit = urlCache.get(key);
+      if (hit) return hit; // get 已把它刷成最新
+      const got = await fetchUrlRaw(id, level);
+      if (got && got.url) urlCache.set(key, got);
+      return got;
+    }
+
 
     // ------------------------------------------------- 收藏 / 心动模式
     // 写操作在宿主侧走 eapi 加密通道（明文 /api/ 会被网易云风控 524），
@@ -616,7 +700,7 @@
       emit();
       pushHistory(song);
       saveResume(0);
-      loadLyric(song.id);
+      store.lyricSong = String(song.id); store.lyricState = "loading"; loadLyric(song.id);
       const myToken = ++playToken;
       try {
         const got = await fetchUrl(song.id, store.quality);
@@ -644,6 +728,13 @@
       } catch (err) {
         setNotice(`获取播放地址失败：${err && err.message ? err.message : err}`);
       }
+      // 预取下一首。放在**当前这首已经发出去之后**，预取绝不能挡住正在播的歌。
+      // 延迟 800ms：避免和当前这首的 /song/url 抢同一条连接。
+      if (prefetchTimer !== null) clearTimeout(prefetchTimer);
+      prefetchTimer = setTimeout(function () {
+        prefetchTimer = null;
+        prefetchSong(peekNext());
+      }, 800);
     }
 
     function playSongs(list, startIndex, opts) {
@@ -891,14 +982,25 @@
       lyricCache.set(String(entry.songId), entry);
     }
 
+    /**
+     * 标记"这首歌的歌词已经落定了"（拿到结果、失败、模块关闭都算）。
+     *
+     * 为什么需要它：门控要的是"可以开始画了"，不是"歌词拿到了" ——
+     * 纯音乐永远没有歌词，歌词接口也会失败，这两种情况都必须放行。
+     * 踩坑 #33：原来的门控直接判 store.lyrics !== null，于是这三条路径全部永久卡死。
+     */
+    function settleLyric(id) {
+      if (store.lyricSong === String(id)) store.lyricState = "done";
+    }
+    
     async function loadLyric(id) {
-      if (!store.modules.lyrics) return;
+      if (!store.modules.lyrics) { settleLyric(id); return; }
       const key = String(id);
       const hit = lyricCache.get(key);
       if (hit) {
         // 命中也要重新 set 一次，把它挪到 LRU 队尾
         cacheLyric(hit);
-        store.lyrics = hit;
+        store.lyrics = hit; settleLyric(id);
         emit();
         return;
       }
@@ -915,10 +1017,10 @@
         // 只有真的拿到歌词才缓存。空歌词（纯音乐/接口异常）不缓存，
         // 否则下次播放会一直吃这个空结果。
         if (entry.lines.length) cacheLyric(entry);
-        store.lyrics = entry;
+        store.lyrics = entry; settleLyric(id);
         emit();
       } catch (err) {
-        store.lyrics = null;
+        store.lyrics = null; settleLyric(id);
       }
     }
 
@@ -991,6 +1093,90 @@
       return { cls: " nm-rise", style: { "--nm-i": Math.min(index, RISE_MAX_INDEX) } };
     }
 
+    /**
+     * 每日推荐是"按天"的：网易云每天给一份新的。
+     *
+     * 而 DSH 桌面端页面能连续存活好几天（实测 32 小时+），store 里的列表
+     * **不会自己失效** —— 原先的加载条件是"列表为空才加载"，于是页面活几天，
+     * 推荐页就冻结几天，而且没有任何手动刷新入口。
+     *
+     * 现在：进入推荐页时认一下"是不是换天了"，换了就静默换掉列表。
+     * 只有这一个检查点 —— 零定时器、零事件监听（用户选的最省方案：
+     * 切走再切回能刷就行）。
+     */
+    let dailyFetchedDay = 0;     // 上次成功拿到日推时的本地日期号（0 = 没拿过）
+    let dailyRefreshing = false;
+    let dailyRetryTimer = null;
+    let dailyRetryCount = 0;
+    let dailySameDayTries = 0;   // 同一早上"内容没变"试了几次
+    const DAILY_RETRY_MS = 400;
+    const DAILY_RETRY_MAX = 25;  // 约 10 秒还排不上就放弃，下次进页面再试
+
+    /** 本地日期号，20261020 这种整数。用本地时区 —— 用户的心理模型是"今天"。 */
+    function todayIndex() {
+      const d = new Date();
+      return d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate();
+    }
+
+    /**
+     * 进推荐页时调一次：列表是前几天的就静默换掉。
+     *
+     * 为什么静默（不设 store.loadingView）：否则切回来会先闪一下
+     * "正在加载每日推荐…"再把列表刷出来。用户要的是"切回来就是新的"。
+     *
+     * 为什么自己定闹钟重试：共用闸被占时直接返回会让这次刷新消失，
+     * 而 effect 不会因为闸空了就必然重跑（踩坑 #16）。
+     */
+    function refreshDailyIfStale() {
+      if (!store.login || !store.dailySongs.length) return;
+      if (dailyRefreshing) return;
+      const today = todayIndex();
+      if (dailyFetchedDay === today) return;
+      if (store.loadingView) {
+        if (dailyRetryCount >= DAILY_RETRY_MAX) {
+          dailyRetryCount = 0;
+          return; // 放弃，下次进页面再试
+        }
+        dailyRetryCount += 1;
+        if (dailyRetryTimer === null) {
+          dailyRetryTimer = setTimeout(() => {
+            dailyRetryTimer = null;
+            refreshDailyIfStale();
+          }, DAILY_RETRY_MS);
+        }
+        return;
+      }
+      dailyRetryCount = 0;
+      dailyRefreshing = true;
+      const before = store.dailySongs.map((s) => s.id).join(",");
+      api("/recommend/songs", {})
+        .then((body) => {
+          if (body.code !== 200) throw new Error(body.message || `code ${body.code}`);
+          const songs = ((body.data && body.data.dailySongs) || []).map(norm).filter(Boolean);
+          if (!songs.length) return;
+          const after = songs.map((s) => s.id).join(",");
+          store.dailySongs = songs;
+          // 内容真的换了才记"今天已拿过"。
+          // 如果拉回来和旧的一模一样，说明网易云还没换日（它未必是本地 0 点换）——
+          // 这种情况下不记账，下次进页面再试一次；但同一早上最多试 5 次，
+          // 免得用户反复切页签时一直发请求。
+          if (after !== before || new Date().getHours() >= 9) {
+            dailyFetchedDay = today;
+            dailySameDayTries = 0;
+          } else if ((dailySameDayTries += 1) >= 5) {
+            dailyFetchedDay = today;
+            dailySameDayTries = 0;
+          }
+          emit();
+        })
+        .catch(() => {
+          /* 静默失败：不打扰用户，下次进推荐页会再试 */
+        })
+        .then(() => {
+          dailyRefreshing = false;
+        });
+    }
+
     async function loadDaily(autoplay) {
       if (store.loadingView) return;
       store.loadingView = "daily";
@@ -1000,6 +1186,8 @@
         if (body.code !== 200) throw new Error(body.message || `code ${body.code}`);
         const songs = ((body.data && body.data.dailySongs) || []).map(norm).filter(Boolean);
         store.dailySongs = songs;
+        dailyFetchedDay = todayIndex();
+        dailySameDayTries = 0;
         emit();
         if (autoplay !== false && songs.length) playSongs(songs, 0);
       } catch (err) {
@@ -1658,9 +1846,17 @@
       // "还没试过"也算忙 —— 否则 useLayoutEffect/useEffect 之间那一帧会闪一下"点击加载"
       const pending = store.login && !store.dailySongs.length && !hasTriedAutoLoad("daily");
       useEffect(() => {
-        if (store.login && !store.dailySongs.length) autoLoadOnce("daily", () => loadDaily(false));
-        // loadingView 也在依赖里：别的加载占着闸时 autoLoadOnce 会直接返回（不记账），
-        // 等它空了这次 effect 会再跑一遍，才能真正发出去。
+        if (!store.login) return;
+        if (!store.dailySongs.length) {
+          autoLoadOnce("daily", () => loadDaily(false));
+          return;
+        }
+        // 已有列表：只在"换天了"的时候静默刷新。
+        // 这一段就是"切走子页签再切回"能拿到新推荐的全部机制 ——
+        // renderView 是 switch 返回单个组件，切走会卸载 DailyView，切回会重跑这里。
+        refreshDailyIfStale();
+        // loadingView 也在依赖里：别的加载占着闸时会被挡住（不记账），
+        // 等它空了这次 effect 会再跑一遍。
       }, [store.login, store.dailySongs.length, store.loadingView]);
       const busy = loading || pending;
       return el(
@@ -1847,6 +2043,16 @@
       const cache = store.cacheStats || {};
       const cacheCfg = (store.settings && store.settings.cache) || {};
       const cacheMax = typeof cacheCfg.max === "number" ? cacheCfg.max : 800;
+      // 客户端三套缓存的上限（来自 settings.cache.clientLimits）
+      const clientLimits = (cacheCfg.clientLimits) || { url: 12, lyric: 40, cover: 300 };
+      const setClientLimit = (k, raw) => {
+        const v = Math.max(0, Math.floor(Number(raw) || 0));
+        const next = Object.assign({}, clientLimits, { [k]: v });
+        // 本地立刻生效（resize），再落盘。顺序不能反：反了会有一下卡顿。
+        store.settings = { ...store.settings, cache: { ...cacheCfg, clientLimits: next } };
+        applyCacheLimits();
+        setCache({ clientLimits: next });
+      };
       const refreshCacheStats = (force) => {
         if (!force && store.cacheStats) return;
         api("/cache/stats", {})
@@ -1863,6 +2069,7 @@
       const setCache = (patch) => {
         const next = { ...cacheCfg, ...patch };
         store.settings = { ...store.settings, cache: next };
+        applyCacheLimits(); // 上限改了要立刻生效（resize 三套缓存）
         emit();
         saveSettingsDebounced({ cache: next });
         // 路径/上限改了要重新问宿主，让「当前缓存文件」这行立刻反映新位置
@@ -1972,6 +2179,44 @@
             el("span", { className: "nm-settings-value" },
               lyricCache.size + " 首 / " + SkinPalette.cacheSize() + " 张")),
           el("div", { className: "nm-settings-row" },
+            // 客户端三套缓存的上限。放在同一组里，用户能一眼看到"哪些东西在占内存"。
+            // 0 = 不缓存（会立即清空并停止写入）。
+            el("div", { className: "nm-settings-row" },
+              el("span", null, "播放地址缓存上限"),
+              el("input", {
+                type: "number",
+                className: "nm-input",
+                min: 0,
+                max: 500,
+                step: 4,
+                value: clientLimits.url,
+                title: "预取过的歌切过去不用等网络。0 = 不缓存。",
+                onChange: (e) => setClientLimit("url", e.target.value),
+              })),
+            el("div", { className: "nm-settings-row" },
+              el("span", null, "歌词缓存上限"),
+              el("input", {
+                type: "number",
+                className: "nm-input",
+                min: 0,
+                max: 5000,
+                step: 20,
+                value: clientLimits.lyric,
+                title: "反复听同一首歌时不重复拉歌词。0 = 不缓存。",
+                onChange: (e) => setClientLimit("lyric", e.target.value),
+              })),
+            el("div", { className: "nm-settings-row" },
+              el("span", null, "封面分析缓存上限"),
+              el("input", {
+                type: "number",
+                className: "nm-input",
+                min: 0,
+                max: 5000,
+                step: 100,
+                value: clientLimits.cover,
+                title: "封面取色调用的缓存。0 = 不缓存（背景着色会变慢）。",
+                onChange: (e) => setClientLimit("cover", e.target.value),
+              })),
             el("span", null, "音质探测缓存上限"),
             el("input", {
               type: "number",
@@ -2190,66 +2435,345 @@
      * （那一条既重复又白占高度、还会把页面滚动条带跑），控制只能落在这里。
      * 歌词下标与背景共用 activeLyricIndex，两处永远同步。
      */
+    /**
+     * 入场档位。
+     *
+     * **用户明确要求：每次打开播放器都要完整走一遍入场动画**，不要"切回来只淡入"。
+     * 所以档位简化成两档，判据只有一个 —— 这次挂载是"同一首歌的挂载"还是"换了歌"：
+     *   full  挂载（含从别的页签切回来）：完整编排
+     *   song  换歌（组件没卸载，只是 song 变了）：只重播封面 / 标题 / 进度
+     *
+     * 这里**不缓存页面** —— 页签切走时组件本来就会卸载（renderView 是 switch，
+     * 没有保活），切回来是全新挂载，所以自然每次都走 full。
+     * 容器高度给足，避免"渲染到一半跳一下"。
+     */
+    let playerAnimSong = null;
+
+    // ── 播放器页的"就绪门控"────────────────────────────────────
+    //
+    // 为什么需要：网络慢时封面还没解码、歌词还没回来，页面会先画出一版不完整的
+    // 排版 —— 用户看到的就是"渲染卡住 / 排版跳一下"。
+    //
+    // 门控只等两样（都是**排版本身需要**的）：
+    //   ① 封面解码完成
+    //   ② 歌词请求落定（成功或失败都算；纯音乐永远没有歌词，不能死等）
+    //
+    // **绝不等音频地址**：/song/url 是整条链最慢的一环，等它页面就真卡住了。
+    const coverReady = new Set();
+    const coverWaiting = new Map();
+
+    // 门控的硬超时：每首歌最多等 GATE_TIMEOUT_MS，到点就放行。
+    // 为什么必须有：门控本质是"等某个状态变化"，而这样的假设一旦出错就是**永久白屏**。
+    // 有超时的话，最坏情况只是这次渲染慢 1.2 秒（踩坑 #33）。
+    const GATE_TIMEOUT_MS = 1200;
+    const gateTimeoutKeys = new Set();
+    let gateTimeoutTimer = null;
+
+    /** 这首歌是否已经超时（超时后一律视为就绪）。 */
+    function gateTimedOut(songKey) {
+      return !!songKey && gateTimeoutKeys.has(songKey);
+    }
+
+    /** 起一个超时；到点记入放行名单并推一次渲染。重复调用无副作用。 */
+    function armGateTimeout(songKey) {
+      if (!songKey || gateTimeoutKeys.has(songKey)) return;
+      if (gateTimeoutTimer !== null) return; // 已有计时器在跑
+      gateTimeoutTimer = setTimeout(function () {
+        gateTimeoutTimer = null;
+        const cur = store.song ? String(store.song.id) : "";
+        if (cur) gateTimeoutKeys.add(cur);
+        // 名单别无限长：门控只关心当前歌，留最近几首就够
+        if (gateTimeoutKeys.size > 4) {
+          const keep = gateTimeoutKeys.has(cur) ? cur : Array.from(gateTimeoutKeys).pop();
+          gateTimeoutKeys.clear();
+          if (keep) gateTimeoutKeys.add(keep);
+        }
+        emit();
+      }, GATE_TIMEOUT_MS);
+    }
+
+    /**
+     * 预解码一张封面。永远 resolve（失败也算"就绪"），所以不会卡住门控。
+     * 用 Image 而不是等 background-image —— 后者没有完成回调。
+     */
+    function ensureCoverReady(url) {
+      if (!url) return Promise.resolve(false);
+      if (coverReady.has(url)) return Promise.resolve(true);
+      const pending = coverWaiting.get(url);
+      if (pending) return pending;
+      const p = new Promise(function (resolve) {
+        let done = false;
+        const finish = function (ok) {
+          if (done) return;
+          done = true;
+          coverReady.add(url); // 失败也记，避免反复重试把门控卡死
+          coverWaiting.delete(url);
+          resolve(ok);
+        };
+        try {
+          const img = new Image();
+          // 8 秒兜底：图挂了也不能让播放器永远停在骨架屏
+          const timer = setTimeout(function () { finish(false); }, 8000);
+          img.onload = function () { clearTimeout(timer); finish(true); };
+          img.onerror = function () { clearTimeout(timer); finish(false); };
+          img.src = url;
+        } catch (err) {
+          finish(false);
+        }
+      });
+      coverWaiting.set(url, p);
+      return p;
+    }
+
+    /**
+     * 「播放器」子页签 —— 杂志排版（2026-10-20 改版）。
+     *
+     * 为什么重排：原来七个模块（封面/标题/进度/传输/音量/收藏/歌词）视觉重量一样、
+     * 竖着堆，读起来像一张设置表单 —— 没有焦点，所以"丑"。
+     * 现在按编辑排版的层次来：
+     *   封面从左侧出血并向右渐隐 → 歌名当大标题逐字升起 → 一根手绘线收尾
+     *   → 歌手/专辑/音质 → 进度 → 三分格控制 → 底部三行歌词
+     *
+     * **这里修掉的那个排版 bug**：老版本把模式按钮和传输控制放进同一个 flex 行，
+     * 整组居中时播放键被顶偏约 20px。现在用 grid 的 1fr auto 1fr，
+     * 中列永远在正中，左右两侧放什么都不影响它。
+     */
     function PlayerView() {
       useStore();
       useClock(); // 需要时间/进度
+      // hooks 必须无条件调用，所以放在"没有歌"的早退之前
+      const entRef = useRef(null);
+      const entKeyRef = useRef(null);
+      // 已经"呈现给用户"的那一屏（完整快照，含算好的歌词行）。
+      // 切歌时新歌没就绪，就继续渲染它 —— 画面一次都不跳。
+      const shownRef = useRef(null);
       const song = store.song;
+      const songKey = song ? String(song.id) : "";
+
+      // 只在"挂载"或"换歌"那一刻决定档位，普通重渲染不改它。
+      // 注意这里存的是**完整类名**而不是拼接出来的 —— 拼出来的类名无法被
+      // ambient-selftest 里那条"JS 引用的 class 都要在 CSS 里定义"的检查解析到。
+      //
+      // 判据只有一条：这次挂载之前有没有"上一首歌"。
+      //   · 挂载（含切页签回来）→ playerAnimSong 是上一次的值 → 走 full
+      //   · 同一首歌内重渲染 → 不改（entRef 已存在）
+      //   · 换歌 → songKey 变了 → 走 song
+      if (entRef.current === null || entKeyRef.current !== songKey) {
+        const changingSong = entKeyRef.current !== null && entKeyRef.current !== songKey;
+        entKeyRef.current = songKey;
+        entRef.current = changingSong ? "nm-ent-song" : "nm-ent-full";
+      }
+      useEffect(() => {
+        playerAnimSong = songKey;
+      });
+
       if (!song) return el("div", { className: "nm-hint" }, "还没有播放中的歌曲 —— 去「推荐」或「歌单」里点一首吧");
-      const lines = store.lyrics ? store.lyrics.lines : [];
-      const current = activeLyricIndex(lines, store.time);
-      const from = Math.max(0, current - 2);
-      const slice = lines.slice(from, current + 5);
-      const dur = audio && audio.duration ? audio.duration : song.duration || 0;
-      const cur = audio ? audio.currentTime : 0;
-      return el("div", { className: "nm-player" },
-        song.pic ? el("div", { className: "nm-player-cover", style: { backgroundImage: `url("${song.pic}")` } }) : null,
-        el("div", { className: "nm-player-meta" },
-          el("div", { className: "nm-player-title" }, song.name),
-          el("div", { className: "nm-player-artist" },
-            song.artist + (song.album ? " · " + song.album : ""),
-            el(QualityBadge, {}))),
-        // 进度条
-        el("div", { className: "nm-player-progress" },
-          el("span", { className: "nm-time" }, fmtTime(cur)),
-          el("input", {
-            type: "range",
-            className: "nm-range",
-            min: 0,
-            max: Math.max(dur, 1),
-            step: 1,
-            value: Math.min(cur, dur),
-            onChange: (e) => { if (audio) audio.currentTime = Number(e.target.value); },
-          }),
-          el("span", { className: "nm-time" }, fmtTime(dur))),
-        // 模式 + 传输控制（共用控件；心动模式是模式循环里的一档）
-        el("div", { className: "nm-player-transport" },
-          ModeButton({ size: 18 }),
-          TransportControls({ className: "nm-player-transport-inner", size: 22, playClass: "nm-btn-xl" })),
-        // 音量
-        store.modules.volume
-          ? el("div", { className: "nm-player-volume" },
-              el(IconVolume, { size: 14 }),
+
+      // 组装一份**完整快照**：把这一帧要用的东西全部算好存下来。
+      // 为什么要连当前歌词行一起存：切歌后 store.time 会归零，
+      // 若渲染时再算，旧歌词会跳回第一行 —— "画面不变"就破了。
+      function snapshot(s) {
+        const ls = store.lyrics ? store.lyrics.lines : [];
+        const cur0 = activeLyricIndex(ls, store.time);
+        const f0 = Math.max(0, cur0 - 1);
+        return {
+          song: s,
+          lines: ls,
+          current: cur0,
+          from: f0,
+          slice: ls.slice(f0, cur0 + 3),
+          dur: audio && audio.duration ? audio.duration : s.duration || 0,
+          cur: audio ? audio.currentTime : 0,
+          quality: store.actualQuality,
+        };
+      }
+
+      const coverOk = !song.pic || coverReady.has(song.pic);
+      // 「可以开始画了」而不是「歌词拿到了」：
+      //   · 有歌词对象 → 可以
+      //   · 这首歌的歌词已落定（成功/失败/纯音乐/模块关闭）→ 也可以
+      //   · 都没有 → 最多再等 GATE_TIMEOUT_MS，到点强制放行
+      const lyricDone =
+        store.lyrics !== null ||
+        (store.lyricSong === songKey && store.lyricState === "done");
+      const ready = (coverOk && lyricDone) || gateTimedOut(songKey);
+
+      // 触发解码（幂等）。解码完成后推一次，让门控重新判定。
+      if (song.pic && !coverReady.has(song.pic)) {
+        ensureCoverReady(song.pic).then(function () {
+          if (store.song && String(store.song.id) === songKey) emit();
+        });
+      }
+
+      // ── 换屏判定 ──
+      // 就绪：更新快照并渲染它（换歌时播 song 档入场）。
+      // 未就绪但有上一屏：**渲染旧快照，一个字段都不动**（这就是"页面不要变"）。
+      // 未就绪且没有上一屏：第一次进播放器就点歌 → 只能先给骨架。
+      const prev = shownRef.current;
+      // 没就绪就起超时：保证最多等 GATE_TIMEOUT_MS 一定画得出来
+      if (!ready) armGateTimeout(songKey);
+      if (ready) shownRef.current = snapshot(song);
+      const view = shownRef.current || null;
+      const stale = !ready && !!prev; // 正在显示上一屏（不播入场）
+
+      // 下面整段渲染都从 view 取数据，不再直接读 store.time / store.lyrics
+      const vs = view ? view.song : null;
+      // 控件跟"画面上那一首"走：显示上一屏时就是旧歌，避免"看到 A 却收藏了 B"。
+      const ctlSong = vs || song;
+      const rawTitle = String((vs || song).name || "");
+      const titleChars = Array.from(rawTitle).slice(0, 26);
+      const truncated = Array.from(rawTitle).length > 26;
+      const lines = view ? view.lines : [];
+      const current = view ? view.current : -1;
+      const from = view ? view.from : 0;
+      const slice = view ? view.slice : [];
+      const dur = view ? view.dur : 0;
+      const cur = view ? view.cur : 0;
+
+      // 骨架：只替换**需要等网络的部分**（封面图 + 歌词占位）。
+      // 交互控件必须照常存在 —— 用户在"等封面"时也应该能暂停、切歌、切模式，
+      // 否则等于把等待期变成了不可用期（heartbeat 测试正是因此报红的）。
+      if (!view) {
+        return el(
+          "div",
+          { className: "nm-pl nm-pl-wait" },
+          el(
+            "div",
+            { className: "nm-pl-art" },
+            el("div", { className: "nm-pl-img nm-pl-img-wait" }),
+            el("div", { className: "nm-pl-stamp" }, (song.album ? song.album + " · " : "") + "正在载入")
+          ),
+          el(
+            "div",
+            { className: "nm-pl-col" },
+            el("div", { className: "nm-pl-eyebrow" }, el("i", { className: "nm-pl-rule" }), el("span", null, "正在播放")),
+            el("h2", { className: "nm-pl-title", title: rawTitle },
+              el("span", { className: "nm-pl-ch" }, el("i", null, rawTitle))),
+            el("div", { className: "nm-pl-by" }, el("span", { className: "nm-pl-who" }, song.artist || "")),
+            el("div", { className: "nm-pl-skel" },
+              el("div", { className: "nm-pl-skel-line" }),
+              el("div", { className: "nm-pl-skel-line nm-pl-skel-short" })),
+            el(
+              "div",
+              { className: "nm-pl-ctl" },
+              el("div", { className: "nm-pl-side nm-pl-left" }, ModeButton({ size: 16 })),
+              TransportControls({ className: "nm-pl-center", size: 20, playClass: "nm-pl-play" }),
+              el(
+                "div",
+                { className: "nm-pl-side nm-pl-right" },
+                LikeButton({ song: ctlSong }),
+                Btn({ title: "添加到歌单", onClick: () => openPicker(ctlSong), children: "＋" })
+              )
+            ),
+            el("div", { className: "nm-pl-wait-hint" }, "正在载入封面与歌词…")
+          )
+        );
+      }
+
+      return el(
+        "div",
+        { className: "nm-pl " + (stale ? "nm-pl-hold" : entRef.current) },
+        // ── 左：封面（出血 + 向右渐隐，用 mask 所以不依赖底色）──
+        el(
+          "div",
+          { className: "nm-pl-art" },
+          vs.pic
+            ? el("div", { className: "nm-pl-img", style: { backgroundImage: 'url("' + vs.pic + '")' } })
+            : el("div", { className: "nm-pl-img nm-pl-img-none" }),
+          el("div", { className: "nm-pl-stamp" }, (vs.album ? vs.album + " · " : "") + "正在播放")
+        ),
+        // ── 右：内容 ──
+        el(
+          "div",
+          { className: "nm-pl-col" },
+          el("div", { className: "nm-pl-eyebrow" }, el("i", { className: "nm-pl-rule" }), el("span", null, "正在播放")),
+          el(
+            "h2",
+            { className: "nm-pl-title", title: rawTitle },
+            titleChars.map((c, i) =>
+              el(
+                "span",
+                { key: i, className: "nm-pl-ch" },
+                el("i", { style: { animationDelay: (0.26 + i * 0.024).toFixed(3) + "s" } }, c === " " ? "\u00A0" : c)
+              )
+            ),
+            truncated ? el("span", { className: "nm-pl-ch" }, el("i", null, "…")) : null
+          ),
+          el(
+            "svg",
+            { className: "nm-pl-flourish", viewBox: "0 0 210 12", "aria-hidden": "true" },
+            el("path", { d: "M2 8 C 44 2, 86 11, 128 5 S 190 9, 208 4" })
+          ),
+          el(
+            "div",
+            { className: "nm-pl-by" },
+            el("span", { className: "nm-pl-who" }, vs.artist || ""),
+            vs.album ? el("span", { className: "nm-pl-sep" }) : null,
+            vs.album ? el("span", { className: "nm-pl-what" }, vs.album) : null,
+            el(QualityBadge, {})
+          ),
+          el(
+            "div",
+            { className: "nm-pl-prog" },
+            el("div", { className: "nm-pl-trackwrap" },
               el("input", {
                 type: "range",
-                className: "nm-range",
+                className: "nm-range nm-pl-range",
                 min: 0,
-                max: 100,
-                value: Math.round(store.volume * 100),
-                onChange: (e) => setVolume(Number(e.target.value) / 100, true),
-              }))
-          : null,
-        // 收藏操作（爱心用共用控件）
-        el("div", { className: "nm-player-actions" },
-          LikeButton({ song, withLabel: true }),
-          Btn({ onClick: () => openPicker(song), children: "＋ 添加到歌单" })),
-        slice.length
-          ? el("div", { className: "nm-player-lyrics" },
-              slice.map((ln, i) =>
-                el("div", { key: from + i, className: "nm-lyric" + (from + i === current ? " nm-lyric-on" : "") },
-                  el("div", { className: "nm-lyric-text" }, ln.text || "…"),
-                  ln.tr ? el("div", { className: "nm-lyric-tr" }, ln.tr) : null)))
-          : el("div", { className: "nm-hint" }, "暂无歌词"));
+                max: Math.max(dur, 1),
+                step: 1,
+                value: Math.min(cur, dur),
+                onChange: (e) => {
+                  if (audio) audio.currentTime = Number(e.target.value);
+                },
+              })),
+            el("div", { className: "nm-pl-times" }, el("span", null, fmtTime(cur)), el("span", null, fmtTime(dur)))
+          ),
+          el(
+            "div",
+            { className: "nm-pl-ctl" },
+            el("div", { className: "nm-pl-side nm-pl-left" }, ModeButton({ size: 16 })),
+            TransportControls({ className: "nm-pl-center", size: 20, playClass: "nm-pl-play" }),
+            el(
+              "div",
+              { className: "nm-pl-side nm-pl-right" },
+              LikeButton({ song: ctlSong }),
+              Btn({ title: "添加到歌单", onClick: () => openPicker(ctlSong), children: "＋" })
+            )
+          ),
+          store.modules.volume
+            ? el(
+                "div",
+                { className: "nm-pl-vol" },
+                el(IconVolume, { size: 13 }),
+                el("input", {
+                  type: "range",
+                  className: "nm-range",
+                  min: 0,
+                  max: 100,
+                  value: Math.round(store.volume * 100),
+                  onChange: (e) => setVolume(Number(e.target.value) / 100, true),
+                })
+              )
+            : null,
+          slice.length
+            ? el(
+                "div",
+                { className: "nm-pl-lyr" },
+                slice.map((ln, i) =>
+                  el(
+                    "div",
+                    { key: from + i, className: "nm-pl-l" + (from + i === current ? " nm-pl-l-on" : "") },
+                    el("span", { className: "nm-pl-lt" }, ln.text || "…"),
+                    ln.tr ? el("span", { className: "nm-pl-ltr" }, ln.tr) : null
+                  )
+                )
+              )
+            : el("div", { className: "nm-hint nm-pl-none" }, "暂无歌词")
+        )
+      );
     }
+
 
     function renderView() {
       switch (store.view) {
@@ -2680,7 +3204,7 @@
 /* 本插件组件消费的是 --color-* 这套令牌（不是 DSH 的 --dsw-*）。
    它们原本不存在 → 组件全部落到硬编码的深色兜底值上，所以界面又黑又不透。
    在这里就地定义成玻璃值，整个音乐 UI 一次变透。 */
-.nm-panel,.nm-page-root,.nm-player{
+.nm-panel,.nm-page-root,.nm-pl{
   --color-bg1:rgba(13,17,23,.45);
   --color-bg2:rgba(255,255,255,.06);
   --color-bg3:rgba(255,255,255,.11);
@@ -2841,7 +3365,6 @@
 /* 传输控制容器的三处用法（共用 TransportControls，只有排布差异） */
 .nm-transport{display:flex;align-items:center;gap:4px}
 .nm-playerbar-transport{display:flex;align-items:center;gap:4px;flex:none}
-.nm-player-transport-inner{display:flex;align-items:center;gap:12px}
 .nm-side-transport{display:flex;align-items:center;gap:1px;flex:none}
 .nm-like-on:hover{color:#fb7185}
 
@@ -2857,24 +3380,168 @@
 .nm-picker-item:hover{background:rgba(255,255,255,.11)}
 .nm-picker-foot{display:flex;justify-content:flex-end;padding-top:8px}
 
-/* ── 「播放器」子页签：复刻 APP 的「正在播放」页 ─────────────────
-   整页模式已经不渲染底层播放条了，所以传输控制必须在本页自带一套。 */
-.nm-player{display:flex;flex-direction:column;gap:14px;align-items:center;padding:8px 0 6px}
-.nm-player-cover{width:min(226px,44vw);aspect-ratio:1;border-radius:18px;background-size:cover;background-position:center center;
-  box-shadow:0 18px 50px rgba(0,0,0,.5),0 0 0 1px rgba(255,255,255,.14)}
-.nm-player-meta{display:flex;flex-direction:column;gap:4px;align-items:center}
-.nm-player-title{font-size:17px;font-weight:600;color:var(--color-fg1);text-align:center}
-.nm-player-artist{font-size:12.5px;color:var(--color-fg3);text-align:center}
-.nm-player-progress{display:flex;align-items:center;gap:10px;width:min(560px,92%)}
-.nm-player-progress .nm-range{flex:1}
-.nm-player-transport{display:flex;align-items:center;gap:12px}
-.nm-player-volume{display:flex;align-items:center;gap:8px;color:var(--color-fg3);width:min(280px,70%)}
-.nm-player-volume .nm-range{flex:1}
-.nm-player-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
-.nm-player-lyrics{width:100%;max-height:30vh;overflow-y:auto;text-align:center;padding:6px 0;
-  -webkit-mask-image:linear-gradient(to bottom,transparent,#000 12%,#000 88%,transparent);
-  mask-image:linear-gradient(to bottom,transparent,#000 12%,#000 88%,transparent)}
-.nm-btn-xl{width:50px;height:50px;border-radius:50%;padding:0}
+/* ── 「播放器」子页签：杂志排版（2026-10-20 改版）─────────────────
+   层次：封面出血 → 大标题 → 手绘线 → 元信息 → 进度 → 三分格控制 → 歌词三行
+   入场分三档（full / song / light），全部只动 transform·opacity·clip-path。 */
+
+/* 整体：左 46% 封面 + 右 54% 内容。窄屏（<760px）会自动堆叠。 */
+.nm-pl{position:relative;display:grid;grid-template-columns:minmax(0,46%) minmax(0,54%);
+  min-height:100%;overflow:hidden}
+
+/* ── 左：封面出血 + 向右渐隐 ──
+   用 mask 而不是叠一层深色渐变 —— 这样背景是什么颜色都自然，皮肤开关关掉也对。 */
+.nm-pl-art{position:relative;overflow:hidden;min-height:200px;
+  -webkit-mask-image:linear-gradient(90deg,#000 56%,transparent 97%);
+  mask-image:linear-gradient(90deg,#000 56%,transparent 97%)}
+.nm-pl-img{position:absolute;inset:-2%;background-size:cover;background-position:center center}
+.nm-pl-img-none{background:linear-gradient(150deg,#1a2030,#0d1119)}
+.nm-pl-stamp{position:absolute;left:18px;bottom:16px;font-size:10px;letter-spacing:.16em;
+  text-transform:uppercase;color:rgba(255,255,255,.46);max-width:80%;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* ── 右：内容列 ── */
+.nm-pl-col{display:flex;flex-direction:column;justify-content:center;
+  padding:18px 22px 18px 6px;min-width:0}
+
+/* 眉标：一根短横线 + 小字 */
+.nm-pl-eyebrow{display:flex;align-items:center;gap:9px;font-size:10px;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--color-fg3,#7c8698)}
+.nm-pl-eyebrow .nm-pl-rule{display:block;width:24px;height:1px;background:#8aa8ff;opacity:.85;
+  transform-origin:left}
+
+/* 大标题：每个字一个裁切窗口，字从里面升起来 */
+.nm-pl-title{margin:10px 0 0;font-size:clamp(26px,3.6vw,46px);font-weight:800;
+  letter-spacing:-1.2px;line-height:1.12;color:var(--color-fg1,#eef1f7);
+  display:flex;flex-wrap:wrap;align-items:flex-end;
+  /* 短歌名（1~3 个字）也要有足够的行高，否则逐字位移看不出幅度 */
+  min-height:1.12em}
+.nm-pl-ch{display:inline-block;overflow:hidden;vertical-align:bottom;
+  /* 裁切窗口给足高度，字往下探 1em 也不会漏出别的行 */
+  padding-bottom:.06em}
+.nm-pl-ch > i{display:inline-block;font-style:normal}
+
+/* 手绘下划线：SVG 描边自己画出来 */
+.nm-pl-flourish{display:block;width:min(210px,60%);height:11px;margin:6px 0 0;overflow:visible}
+.nm-pl-flourish path{fill:none;stroke:#8aa8ff;stroke-width:1.5;stroke-linecap:round;opacity:.7;
+  stroke-dasharray:260;stroke-dashoffset:260}
+
+/* 歌手 · 专辑 · 音质徽标 */
+.nm-pl-by{display:flex;align-items:center;gap:9px;margin-top:12px;min-width:0;flex-wrap:wrap}
+.nm-pl-who{font-size:14px;font-weight:600;color:var(--color-fg1,#eef1f7);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:60%}
+.nm-pl-sep{width:3px;height:3px;border-radius:50%;background:var(--color-fg3,#7c8698);flex:none}
+.nm-pl-what{font-size:11.5px;color:var(--color-fg3,#7c8698);min-width:0;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* 进度 */
+.nm-pl-prog{margin-top:20px;max-width:520px}
+.nm-pl-trackwrap{display:flex;align-items:center}
+.nm-pl-range{width:100%;height:3px}
+.nm-pl-times{display:flex;justify-content:space-between;margin-top:5px;
+  font-size:10.5px;color:var(--color-fg3,#7c8698);font-variant-numeric:tabular-nums}
+
+/* ── 控制：三分格 ──
+   ★ 这就是那个排版 bug 的修法：中列 auto，左右各 1fr，
+     所以传输控制永远在正中，左边放模式按钮也不会把它顶偏。 */
+.nm-pl-ctl{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;
+  gap:8px;margin-top:16px;max-width:520px}
+.nm-pl-side{display:flex;align-items:center;gap:6px;min-width:0}
+.nm-pl-left{justify-content:flex-start}
+.nm-pl-right{justify-content:flex-end}
+.nm-pl-center{display:flex;align-items:center;gap:10px;justify-content:center}
+.nm-pl-play{width:46px;height:46px;border-radius:50%;padding:0}
+
+/* 音量（单独一行，小一号） */
+.nm-pl-vol{display:flex;align-items:center;gap:8px;margin-top:12px;max-width:200px;
+  color:var(--color-fg3,#7c8698)}
+.nm-pl-vol .nm-range{flex:1;height:3px}
+
+/* 歌词：三行，当前行更亮；换行时用 clip-path 擦开（"书写"感） */
+.nm-pl-lyr{margin-top:16px;padding-top:12px;border-top:1px solid var(--color-border,rgba(255,255,255,.08));
+  max-width:560px;min-height:0;overflow:hidden}
+.nm-pl-l{display:flex;flex-direction:column;gap:1px;font-size:12.5px;line-height:1.65;
+  color:var(--color-fg3,#7c8698);transition:color .32s ease}
+.nm-pl-l-on{color:var(--color-fg1,#eef1f7);font-weight:600}
+.nm-pl-lt{white-space:pre-wrap;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nm-pl-ltr{font-size:10.5px;color:var(--color-fg3,#7c8698);white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+.nm-pl-l-on .nm-pl-ltr{color:var(--color-fg2,#b9c1d1)}
+.nm-pl-none{margin-top:14px}
+
+/* 正在显示"上一屏"（新歌还没就绪）：不播入场、不做任何动画，画面完全静止 */
+.nm-pl-hold{animation:none}
+
+/* ── 骨架态（封面/歌词还没就绪）────────────────────────────────
+   目标不是"好看"，而是"看起来还活着"：真数据照常显示，只有封面与歌词位置是占位。
+   占位沿用"暗底 + 淡描边"的规则，不引入新颜色。 */
+.nm-pl-wait{animation:nmPlFade .2s ease both}
+.nm-pl-img-wait{background:linear-gradient(150deg,#161b26,#0d1119);
+  animation:nmPlBreathe 1.6s ease-in-out infinite}
+@keyframes nmPlBreathe{0%,100%{opacity:.55}50%{opacity:.9}}
+.nm-pl-skel{display:flex;flex-direction:column;gap:8px;margin-top:22px;max-width:320px}
+.nm-pl-skel-line{height:10px;border-radius:6px;
+  background:linear-gradient(90deg,rgba(255,255,255,.05),rgba(255,255,255,.11),rgba(255,255,255,.05));
+  background-size:200% 100%;animation:nmPlShimmer 1.4s linear infinite}
+.nm-pl-skel-short{width:56%}
+@keyframes nmPlShimmer{to{background-position:-200% 0}}
+.nm-pl-wait-hint{margin-top:14px;font-size:11.5px;color:var(--color-fg3,#7c8698)}
+
+/* ══════════ 入场编排（两档：每次挂载 full / 换歌 song）══════════
+   full  : 封面擦开 → 眉标线 → 标题逐字 → 手绘线 → 元信息 → 进度 → 按钮 → 歌词
+   song  : 只重播跟"这首歌"有关的三件（封面 / 标题 / 进度）
+   light : 只淡入，什么编排都不跑
+   全部只动 transform / opacity / clip-path / stroke-dashoffset。 */
+
+/* 默认状态：元素先"藏起来"，等档位对应的 @keyframes 把它们放出来 */
+.nm-ent-full .nm-pl-img{clip-path:inset(0 100% 0 0);animation:nmPlWipe .8s cubic-bezier(.22,.61,.36,1) .04s both}
+.nm-ent-full .nm-pl-stamp{opacity:0;animation:nmPlFade .5s ease 1.05s both}
+.nm-ent-full .nm-pl-rule{transform:scaleX(0);animation:nmPlDraw .5s cubic-bezier(.22,.61,.36,1) .16s both}
+.nm-ent-full .nm-pl-eyebrow > span{opacity:0;animation:nmPlFade .42s ease .40s both}
+/* 位移用 em（跟字号走）而不是百分比 —— 短歌名时 112% 只有半个字高，看不出在动。
+   1em 保证不管标题多长，位移都是"一整个字高"，视觉幅度一致。 */
+.nm-ent-full .nm-pl-ch > i{transform:translateY(1em);animation:nmPlRise .64s cubic-bezier(.22,.61,.36,1) both}
+.nm-ent-full .nm-pl-flourish path{animation:nmPlStroke 1.05s cubic-bezier(.22,.61,.36,1) .7s both}
+.nm-ent-full .nm-pl-by{opacity:0;transform:translateY(10px);animation:nmPlUp .55s cubic-bezier(.22,.61,.36,1) .9s both}
+.nm-ent-full .nm-pl-prog{opacity:0;transform:translateY(10px);animation:nmPlUp .5s cubic-bezier(.22,.61,.36,1) 1.02s both}
+.nm-ent-full .nm-pl-ctl{opacity:0;transform:translateY(10px);animation:nmPlUp .5s cubic-bezier(.22,.61,.36,1) 1.14s both}
+.nm-ent-full .nm-pl-vol{opacity:0;animation:nmPlFade .5s ease 1.3s both}
+.nm-ent-full .nm-pl-l{opacity:0;transform:translateY(8px);animation:nmPlUp .5s cubic-bezier(.22,.61,.36,1) both}
+.nm-ent-full .nm-pl-l:nth-child(1){animation-delay:1.36s}
+.nm-ent-full .nm-pl-l:nth-child(2){animation-delay:1.44s}
+.nm-ent-full .nm-pl-l:nth-child(3){animation-delay:1.52s}
+.nm-ent-full .nm-pl-l:nth-child(4){animation-delay:1.6s}
+
+/* 换歌：只播跟歌有关的三件，其余直接呈现 */
+.nm-ent-song .nm-pl-img{clip-path:inset(0 100% 0 0);animation:nmPlWipe .62s cubic-bezier(.22,.61,.36,1) both}
+.nm-ent-song .nm-pl-ch > i{transform:translateY(1em);animation:nmPlRise .5s cubic-bezier(.22,.61,.36,1) both}
+.nm-ent-song .nm-pl-prog{opacity:0;animation:nmPlFade .4s ease .18s both}
+
+/* 切页签：只淡入 */
+@keyframes nmPlWipe{to{clip-path:inset(0 0 0 0)}}
+@keyframes nmPlFade{to{opacity:1}}
+@keyframes nmPlDraw{to{transform:scaleX(1)}}
+@keyframes nmPlRise{to{transform:translateY(0)}}
+@keyframes nmPlUp{to{opacity:1;transform:translateY(0)}}
+@keyframes nmPlStroke{to{stroke-dashoffset:0}}
+
+/* 尊重系统的"减少动态效果"设置 */
+@media (prefers-reduced-motion: reduce){
+  .nm-pl *{animation:none !important;transition:none !important;
+    clip-path:none !important;transform:none !important;opacity:1 !important;
+    stroke-dashoffset:0 !important}
+}
+
+/* 窄屏：左右堆叠，封面缩成顶部一块 */
+@media (max-width:760px){
+  .nm-pl{grid-template-columns:1fr;grid-template-rows:auto 1fr}
+  .nm-pl-art{min-height:150px;max-height:34vh;
+    -webkit-mask-image:linear-gradient(180deg,#000 60%,transparent 100%);
+    mask-image:linear-gradient(180deg,#000 60%,transparent 100%)}
+  .nm-pl-col{padding:14px 16px 18px}
+  .nm-pl-title{font-size:clamp(24px,7vw,34px)}
+  .nm-pl-ctl,.nm-pl-prog{max-width:none}
+}
+
 `;
 
     function injectCss() {
@@ -2896,6 +3563,7 @@
         const s = await hostSettings();
         if (s) {
           store.settings = s;
+          applyCacheLimits();
           store.mode = s.playMode || "sequence";
           store.volume = Number(s.volume ?? 0.8);
           store.quality = s.quality || "lossless";
@@ -2966,6 +3634,12 @@
         store.index = idx >= 0 && idx < store.queue.length ? idx : 0;
         store.song = store.queue[store.index];
         store.duration = store.song.duration || 0;
+        // 恢复会话时**必须**补一次歌词请求。
+        // 原来这里只赋 song 就完了 —— 于是"上次退出时在听歌，这次打开播放器页"
+        // 的门控永远等不到歌词，永久卡在骨架（踩坑 #33）。
+        store.lyricSong = String(store.song.id);
+        store.lyricState = "loading";
+        loadLyric(store.song.id);
         // 心动模式不能恢复：它是「当前歌单是我喜欢的音乐」这个上下文下的产物，
         // 队列来源没了一起恢复过来就是错的。
         if (saved.mode && saved.mode !== "heartbeat" && MODE_LABELS[saved.mode]) store.mode = saved.mode;
@@ -3010,6 +3684,10 @@
       if (reportTimer !== null) {
         clearTimeout(reportTimer);
         reportTimer = null;
+      }
+      if (dailyRetryTimer !== null) {
+        clearTimeout(dailyRetryTimer);
+        dailyRetryTimer = null;
       }
       if (docKeyHandler !== null) {
         document.removeEventListener("keydown", docKeyHandler, true);

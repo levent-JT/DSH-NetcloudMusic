@@ -83,6 +83,8 @@ const SkinPalette = (() => {
     useCoverStats,
     /** 已缓存的封面分析数（设置页展示用）。 */
     cacheSize: () => coverStatsCache.size,
+    /** 改上限：设置页允许用户调"封面缓存上限"，改完立即生效。 */
+    setCacheLimit: (n) => coverStatsCache.resize(n),
     /** 清空封面分析缓存。 */
     clearCache: () => coverStatsCache.clear(),
   }

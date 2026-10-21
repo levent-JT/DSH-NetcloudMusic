@@ -8,25 +8,50 @@ import { Readable } from 'node:stream'
 // 项目根目录从脚本自身位置推导 —— 不把开发机的绝对路径写进仓库，
 // 别人 clone 下来放在任何位置都能直接跑。
 const PROJ = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+// 登录态从插件自己的状态文件读取 —— 不把凭据写进测试脚本。
+//
+// **必须在覆盖 DSH_PROFILE_DIR 之前定位它**，否则读到的就是下面那个临时目录，
+// 而临时文件要到更后面才写 —— 第一次在干净的 temp 里跑必然 ENOENT
+// （这个 bug 一直没暴露，是因为 temp 里留着上一次跑写下的文件）。
+//
+// 宿主真实读哪一份？DSH_PROFILE_DIR 可能是加载插件之后才设进进程环境的，
+// 那种情况下实际落点是 DSH_HOME。两份都存在时取**较新**的那份 ——
+// 实测它们差了 5 天，旧的那份 cookie 早已轮换，读它会得出错误结论。
+function findRealStore() {
+  const bases = [
+    process.env.DSH_PROFILE_DIR,
+    process.env.DSH_HOME,
+    path.join(process.env.USERPROFILE || process.env.HOME || '', '.dsh'),
+  ]
+  const found = []
+  for (const base of bases) {
+    if (!base) continue
+    const p = path.join(base, 'netease-music.json')
+    try {
+      found.push({ p, m: fs.statSync(p).mtimeMs })
+    } catch (err) {
+      /* 这个位置没有 */
+    }
+  }
+  if (!found.length) {
+    throw new Error('找不到真实的 netease-music.json —— 先在插件里登录，再跑这个测试')
+  }
+  found.sort((a, b) => b.m - a.m)
+  if (found.length > 1) {
+    console.log('[host-selftest] 找到 ' + found.length + ' 份配置，用较新的：')
+    for (const f of found) {
+      console.log('    ' + (f === found[0] ? '→ ' : '  ') + f.p + '  ' + new Date(f.m).toISOString())
+    }
+  }
+  return found[0].p
+}
+const REAL_STORE = findRealStore()
+const COOKIE_STR = JSON.parse(fs.readFileSync(REAL_STORE, 'utf8')).cookie
+
+// 定位完真实配置后再把宿主的数据目录指向临时目录，避免测试写到真实配置上。
 const TEST_DIR = process.env.TEMP + '/nm-host-test'
 fs.mkdirSync(TEST_DIR, { recursive: true })
 process.env.DSH_PROFILE_DIR = TEST_DIR.replace(/\//g, '\\')
-
-// 登录态从插件自己的状态文件读取 —— 不把凭据写进测试脚本。
-//
-// 路径解析必须和 lib/index.js 里的 dataDir() 完全一致：宿主那边
-// DSH_PROFILE_DIR 可能是加载插件之后才设进进程环境的，所以实际落点是
-// DSH_HOME。这里如果写死 profiles/desktop 就会读到一份过期的旧配置
-// （这个坑真踩过：旧文件停在更早的时间，cookie 早已轮换）。
-function resolveDataDir() {
-  return (
-    process.env.DSH_PROFILE_DIR ||
-    process.env.DSH_HOME ||
-    path.join(process.env.USERPROFILE || process.env.HOME || '', '.dsh')
-  )
-}
-const REAL_STORE = path.join(resolveDataDir(), 'netease-music.json')
-const COOKIE_STR = JSON.parse(fs.readFileSync(REAL_STORE, 'utf8')).cookie
 
 fs.writeFileSync(
   path.join(TEST_DIR, 'netease-music.json'),
