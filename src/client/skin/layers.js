@@ -191,6 +191,54 @@ const SkinLayers = (() => {
       }
     }
 
+    // ── 背景封面的交叉淡化（方案 B：旧渐隐 + 新渐显 + 缓推）────────────
+    //
+    // 用户要求：800~1200ms 的淡化，旧封面逐渐消失、新封面逐渐出现。取 1000ms。
+    //
+    // **必须等三样齐了再开始过渡**（用户特别提醒的"缓存问题"）：
+    //   ① 新封面 URL 有了
+    //   ② 新封面**解码完成** —— 否则先看到半张未渲染的图再模糊出来，闪一下
+    //   ③ 新封面**取色完成** —— 底色/光晕是异步算的，先拿旧色过渡再变色 = 两段跳
+    // 每一项都有**超时兜底**：图片既不 load 也不 error 时（CSP 阻断 / 请求挂住），
+    // Promise 会永远挂着，背景就永久停在旧画面 —— 这个坑我在样例里刚踩过。
+    const COVER_DECODE_TIMEOUT_MS = 2500;
+    const COVER_FADE_MS = 1000;
+    const COVER_FADE_EASE = "cubic-bezier(.22,.61,.36,1)";
+    
+    // 已解码的封面（成功/失败都记，避免反复重试）
+    const coverDecoded = new Set();
+    const coverDecoding = new Map();
+    
+    /** 预解码一张封面。永远 resolve（成功 / 失败 / 超时三条路都通）。 */
+    function ensureCoverDecoded(url) {
+      if (!url) return Promise.resolve(false);
+      if (coverDecoded.has(url)) return Promise.resolve(true);
+      const pending = coverDecoding.get(url);
+      if (pending) return pending;
+      const p = new Promise((resolve) => {
+        let done = false;
+        const finish = (ok) => {
+          if (done) return;
+          done = true;
+          coverDecoded.add(url);
+          coverDecoding.delete(url);
+          resolve(ok);
+        };
+        const timer = setTimeout(() => finish(false), COVER_DECODE_TIMEOUT_MS);
+        try {
+          const img = new Image();
+          img.onload = () => { clearTimeout(timer); finish(true); };
+          img.onerror = () => { clearTimeout(timer); finish(false); };
+          img.src = url;
+        } catch (err) {
+          clearTimeout(timer);
+          finish(false);
+        }
+      });
+      coverDecoding.set(url, p);
+      return p;
+    }
+
     function AmbientBg() {
       // 只订阅皮肤自己的输入，不订阅音乐 store
       const s = useSyncExternalStore(subscribeSnapshot, getSnapshot);
@@ -209,7 +257,83 @@ const SkinLayers = (() => {
       const enabled = skinOn && mode !== "off" && !!cover;
       const alpha = typeof cfg.panelAlpha === "number" ? cfg.panelAlpha : 0.45;
       // hooks 必须在早退出之前无条件调用；取不到统计值时下面的自适应按中间亮度兜底
-      const stats = SkinPalette.useCoverStats(enabled ? cover : "");
+      // 用"落定"版：要区分"还在算颜色"和"算完了但取不到"。
+      // 只看 stats===null 的话，取不到颜色时（画布污染 / 图挂了）会永远等不到"就绪"，
+      // 背景就永久停在旧画面上（和播放器门控同一个病）。
+      const coverStatsState = SkinPalette.useCoverStatsSettled(enabled ? cover : "");
+      const stats = coverStatsState.stats;
+      const statsSettled = coverStatsState.settled;
+
+      // ── 双层轮换 ──────────────────────────────────────────────────
+      // 两块画布永远都在，只换"哪块显示"。状态就两个字段，逻辑是线性的：
+      //   开始（放新图到另一层，opacity 0）→ 推到可见 → 收尾（active 翻过去）
+      // 渲染期不做条件判断，避免 effect 里 setState 又反过来触发 effect 的乱麻。
+      // 初始值直接带上**当前封面**（已解码/取色完成的话），否则首屏只有 base 纯色、
+// 看不到模糊封面 —— 那是最容易看出来的视觉回归。
+// 未解码时先给空，等下面第 ② 个 effect 把它淡进来（首次进入也有一次柔和淡入，
+// 视觉上是"从纯色晕开成封面"，本来就比硬出现好看）。
+const [slots, setSlots] = useState(function () {
+  // 初始：如果当前封面已解码就直接显示它（首屏不该是纯色）；
+  // 没解码就先空着，等下面的 effect 用淡入动画带进来。
+  const first = enabled && cover && coverDecoded.has(cover) ? cover : "";
+  return first ? { urls: ["", first], phase: "idle" } : { urls: ["", ""], phase: "idle" };
+});
+      const slotsRef = useRef(slots);
+      slotsRef.current = slots;
+      // 过渡进行中的标记：防止中途又来一次切歌把正在淡的层打乱
+      // 解码完成 → 重渲染一次，让下面的 effect 能重新评估"可以开始了吗"
+      const [decodeTick, setDecodeTick] = useState(0);
+      
+      // ① 需要时预解码（幂等，超时兜底在 ensureCoverDecoded 里）
+      useEffect(() => {
+        if (!enabled || !cover) return undefined;
+        if (coverDecoded.has(cover)) return undefined;
+        let alive = true;
+        ensureCoverDecoded(cover).then(() => {
+          if (alive) setDecodeTick(function (n) { return n + 1; });
+        });
+        return function () { alive = false; };
+      }, [enabled, cover]);
+      
+      // ② 换封面：把新图放进"另一层"，由 **CSS 动画**负责从 0 到 1。
+      //
+      // 为什么不用 JS 分两次渲染：React 18 会把连续的 setState 批处理成一次渲染，
+      // DOM 里根本不会出现 opacity:0 那一帧，浏览器只看到最终值 1 → transition 无事可做。
+      // 实测两次都是硬切（一次是永远 0 然后跳 1，一次是一进来就 1）。
+      // 交给 CSS 动画就没有这个问题：元素一挂上，浏览器自己从 0 插值到 1。
+      useEffect(() => {
+        if (!enabled) {
+          setSlots({ urls: ["", ""], phase: "idle" });
+          return undefined;
+        }
+        if (!cover) return undefined;
+        const cur = slotsRef.current;
+        // 已经显示着这张：什么都不做
+        if (cur.urls[cur.urls.length - 1] === cover && cur.phase === "idle") return undefined;
+        // ★ 三条就绪条件：URL、解码完成、取色落定
+        if (!coverDecoded.has(cover) || !statsSettled) return undefined;
+        // 正在淡入这张：不重复触发
+        if (cur.phase === "in" && cur.urls[cur.urls.length - 1] === cover) return undefined;
+      
+        // 放进新层：urls 保持 [旧, 新]，phase=in 让渲染时给新层加淡入动画
+        const prev = cur.urls[cur.urls.length - 1] || "";
+        setSlots({ urls: prev ? [prev, cover] : ["", cover], phase: "in" });
+        return undefined;
+      }, [enabled, cover, statsSettled, decodeTick]);
+      
+      // ③ 收尾：动画时间到了，只留新图，回到 idle
+      useEffect(() => {
+        if (slots.phase !== "in") return undefined;
+        const target = slots.urls[slots.urls.length - 1];
+        const id = setTimeout(function () {
+          setSlots(function (s) {
+            if (s.phase !== "in") return s;
+            if (s.urls[s.urls.length - 1] !== target) return s;
+            return { urls: ["", target], phase: "idle" };
+          });
+        }, COVER_FADE_MS + 140);
+        return function () { clearTimeout(id); };
+      }, [slots]);
 
       // 令牌覆写是副作用：关闭时立刻还原
       useEffect(() => {
@@ -276,14 +400,35 @@ const SkinLayers = (() => {
       return el("div", { className: "nm-amb" }, [
         // 1) 底色：封面主色压暗成纯色。封面没加载出来/半透明时，露的是它而不是白。
         el("div", { key: "base", className: "nm-amb-base", style: { background: deepRgb } }),
-        // 2) 模糊封面铺满（网易云的做法）
-        cover
-          ? el("div", {
-              key: "cover",
+        // 2) 模糊封面：**两层容器**。
+        //    phase=idle    → 只有最后一层，静态显示（和改动前完全一样：一层封面）
+        //    phase=in      → 旧层跑淡出动画、新层跑淡入动画（都是 CSS 动画，纯合成层）
+        //    插值交给浏览器，JS 只决定"谁出现、谁退场" —— 靠 JS 分帧改 opacity 是不可靠的，
+        //    React 会把两次 setState 批处理成一次渲染，浏览器根本看不到中间那帧（实测两次都是硬切）。
+        el(
+          "div",
+          { key: "covers", className: "nm-amb-covers" },
+          slots.urls.map(function (u, i) {
+            if (!u) return null;
+            const isLast = i === slots.urls.length - 1;
+            const fadingIn = slots.phase === "in";
+            // idle：最后一层静态；in：最后一层淡入、前面的层淡出
+            let anim = "none";
+            if (fadingIn) anim = isLast ? "nmAmbFadeIn " + COVER_FADE_MS + "ms " + COVER_FADE_EASE + " both"
+                                       : "nmAmbFadeOut " + COVER_FADE_MS + "ms " + COVER_FADE_EASE + " both";
+            return el("div", {
+              key: "cv" + i + "|" + u,
               className: "nm-amb-cover",
-              style: { backgroundImage: `url("${cover}")`, filter: coverFilter },
-            })
-          : null,
+              style: {
+                backgroundImage: `url("${u}")`,
+                filter: coverFilter,
+                opacity: fadingIn && !isLast ? 0 : 1,
+                animation: anim,
+                willChange: "opacity",
+              },
+            });
+          }),
+        ),
         // 3) 压暗层。两条渐变叠起来：
         //    竖向的负责整体基调（冷蓝 → 微紫，中点 0.62 提亮，纯黑会把封面压成死灰）；
         //    横向的专门压右侧（歌词所在），保证任何封面下歌词都有对比度。

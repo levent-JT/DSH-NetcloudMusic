@@ -473,6 +473,31 @@ try {
   {
     const raw = fs.readFileSync(FILE, 'utf8')
 
+    // ── 背景封面交叉淡化（2026-10-21）──────────────────────────────────
+    //
+    // 用户要求：切歌时旧封面渐隐、新封面渐显（800~1200ms），
+    // 而且"没缓存好之前不许动" —— 这条要钉住三个就绪条件 + 两个 keyframes。
+    // ⚠️ 只查 "@keyframes nmAmbFadeIn" 出现过同样是假断言：把名字改成
+    // nmAmbFadeInREMOVED 它照样匹配。必须查"关键帧里真的有透明度端点"。
+    ok(/@keyframes nmAmbFadeIn\{from\{opacity:0/.test(raw) &&
+       /@keyframes nmAmbFadeOut\{[\s\S]{0,140}?to\{opacity:0/.test(raw),
+      '两个 keyframes 都真的定义了透明度端点（不是只有名字）')
+    // ⚠️ 为什么必须是 CSS 动画而不是 JS 改 opacity：
+    // React 18 会把连续 setState 批处理成一次渲染，DOM 里不出现 opacity:0 那一帧，
+    // 浏览器只看到最终值 → transition 无事可做。我在这上面栽了两次（实测都是硬切）。
+    // ⚠️ 只查 COVER_DECODE_TIMEOUT_MS 出现过是**假断言**（我第一版就这么写，把 setTimeout
+    // 那行删掉、常量留着，它照样通过）。必须查"超时真的接在 setTimeout 上"。
+    ok(/function ensureCoverDecoded\(url\)/.test(raw) &&
+       /const timer = setTimeout\(\(\) => finish\(false\), COVER_DECODE_TIMEOUT_MS\)/.test(raw) &&
+       /clearTimeout\(timer\)/.test(raw),
+      '封面解码有真实超时兜底（setTimeout 与 clearTimeout 都接上了）')
+    ok(/coverDecoded\.has\(cover\) && statsSettled|!coverDecoded\.has\(cover\) \|\| !statsSettled/.test(raw),
+      '就绪条件：解码完成 + 取色落定，缺一不动')
+    ok(/function useCoverStatsSettled\(url\)/.test(raw) && /STATS_TIMEOUT_MS/.test(raw),
+      '取色有 settled 语义（区分「还在算」和「算完但取不到」）+ 超时兜底')
+    ok(/\.nm-amb-covers\{position:absolute/.test(raw),
+      '双层封面有独立容器（裁切出血）')
+
     // ── 门控不会永久卡在骨架（2026-10-21，踩坑 #33）─────────────────────
     //
     // 事故：restoreSession() 恢复会话时只赋 store.song，**从不请求歌词**。

@@ -64,23 +64,62 @@ const SkinPalette = (() => {
       });
     }
 
-    /** 订阅当前封面的主色/亮度。null = 还在算或取不到（此时按中间值兜底）。 */
+    /**
+     * 订阅当前封面的主色/亮度。null = 还在算或取不到（此时按中间值兜底）。
+     *
+     * 如果调用方需要区分"还没算完"和"算完但取不到"，用 useCoverStatsSettled。
+     */
     function useCoverStats(url) {
-      const [stats, setStats] = useState(null);
+      return useCoverStatsSettled(url).stats;
+    }
+
+    /**
+     * 同 useCoverStats，但额外给出 settled —— "这次分析是否已经有结论"。
+     *
+     * 为什么必须区分：analyzeCover 在**取不到颜色时也 resolve(null)**
+     * （画布被污染、图挂了、URL 为空都走这条）。所以只看 stats === null
+     * 判断不了"可以开始用这个颜色了吗"：
+     *   · settled=false 且 stats=null → 还在算，等
+     *   · settled=true  且 stats=null → 算完了但取不到，按中间值兜底继续
+     * 拿 stats===null 当"没就绪"，会在取不到颜色时变成**永久等待**
+     * （和播放器门控那个坑同一个病，见 AGENTS.pitfalls.md #33）。
+     *
+     * 另外加了超时兜底：图片既不 load 也不 error 时（CSP 阻断、请求挂住），
+     * analyzeCover 的 Promise 永远不 resolve —— 必须自己兜，否则同样永久等待。
+     */
+    const STATS_TIMEOUT_MS = 3000;
+    function useCoverStatsSettled(url) {
+      const [state, setState] = useState({ stats: null, settled: false });
       useEffect(() => {
         let alive = true;
-        setStats(null);
-        analyzeCover(url).then((v) => {
-          if (alive) setStats(v);
-        });
-        return () => { alive = false; };
+        let timer = null;
+        setState({ stats: null, settled: false });
+        const settle = (v) => {
+          if (!alive) return;
+          alive = false;
+          if (timer) clearTimeout(timer);
+          setState({ stats: v, settled: true });
+        };
+        // 超时兜底：到点就按"取不到"处理，让调用方可以继续
+        timer = setTimeout(() => settle(null), STATS_TIMEOUT_MS);
+        const p = analyzeCover(url);
+        if (p && typeof p.then === "function") {
+          p.then(settle, () => settle(null));
+        } else {
+          settle(null);
+        }
+        return () => {
+          alive = false;
+          if (timer) clearTimeout(timer);
+        };
       }, [url]);
-      return stats;
+      return state;
     }
 
   // ── 对外接口 ──────────────────────────────────────────────
   return {
     useCoverStats,
+    useCoverStatsSettled,
     /** 已缓存的封面分析数（设置页展示用）。 */
     cacheSize: () => coverStatsCache.size,
     /** 改上限：设置页允许用户调"封面缓存上限"，改完立即生效。 */

@@ -3218,6 +3218,18 @@
 /* 图层顺序（下 → 上）：底色 → 模糊封面 → 压暗 → 主色光晕 → 噪点 → 唱片机 → 歌词。
    底色是「封面主色压暗」的纯色，这样封面没加载出来/半透明时露的是它而不是白。 */
 .nm-amb-base{position:absolute;inset:0}
+/* 封面双层容器：铺满并裁切，两块画布各自 absolute 到它上面。
+   overflow:hidden 是必须的 —— 每层有 inset:-14% 的出血，不裁会盖到别的层上。 */
+/* 背景封面交叉淡化：旧层淡出、新层淡入，同时新层从 1.26 缓推到 1.22。
+   用 CSS 动画而不是 JS 改 opacity —— React 会批处理连续 setState，
+   DOM 里不出现中间帧，transition 无事可做（实测两次都变成硬切）。
+   缩放放在同一个动画里，避免两层 scale 不同步导致的"画面拉一下"。 */
+@keyframes nmAmbFadeIn{from{opacity:0;transform:scale(1.26)}to{opacity:1;transform:scale(1.22)}}
+@keyframes nmAmbFadeOut{from{opacity:1;transform:scale(1.22)}to{opacity:0;transform:scale(1.19)}}
+@media (prefers-reduced-motion: reduce){
+  .nm-amb-cover{animation:none !important}
+}
+.nm-amb-covers{position:absolute;inset:0;overflow:hidden}
 .nm-amb-cover{position:absolute;inset:-14%;background-size:cover;background-position:center center;transform:scale(1.22);will-change:transform}
 .nm-amb-dim{position:absolute;inset:0}
 /* 亮度封顶薄纱：盖在所有背景元素（含歌词）之上。
