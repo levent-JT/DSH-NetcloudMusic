@@ -347,11 +347,43 @@
         emit();
       });
       audio.addEventListener("ended", () => onEnded());
+      // 播放出错 = 直链多半过期（MEDIA_ERR_SRC_NOT_SUPPORTED / code 4）。
+      //
+      // ⚠️ 原来这里只报错、不恢复 —— 症状就是"一首播完自动切下一首会卡住，
+      //    必须手动切歌"。而 main.js 原本的注释写着"error 事件里会 forgetUrl(id)
+      //    重取"，但 forgetUrl 从没被调用过 —— 承诺了恢复逻辑却没实现。
+      //
+      // 现在：忘掉过期地址 → 重取 → 重试一次。还不行就自动跳下一首。
       audio.addEventListener("error", () => {
-        if (audio && audio.src) {
-          store.playing = false;
-          setNotice("播放失败：这首歌可能没有版权或音源失效");
-          emit();
+        if (!audio || !audio.src) return;
+        store.playing = false;
+        const cur = store.song;
+        const songId = cur ? String(cur.id) : "";
+      
+        if (songId) {
+          const tries = urlRetryCount.get(songId) || 0;
+          if (tries < 1) {
+            urlRetryCount.set(songId, tries + 1);
+            setNotice("音源地址过期，正在重新获取…");
+            emit();
+            // 忘掉这一首所有档位的缓存，再重走取址+起播
+            try { forgetUrl(songId); } catch (err) { /* 清缓存失败也继续重试 */ }
+            const idx = store.index;
+            setTimeout(function () {
+              try { playIndex(idx); } catch (err) { /* playIndex 内部有自己的 catch */ }
+            }, 220);
+            return;
+          }
+          urlRetryCount.delete(songId);
+        }
+      
+        // 重试过还是失败：安静跳到下一首，别让歌单停在这里
+        setNotice("这首音源不可用，已跳到下一首");
+        emit();
+        if (store.queue.length > 1) {
+          setTimeout(function () {
+            try { next(false); } catch (err) { /* 下一首失败会再走一遍本逻辑 */ }
+          }, 400);
         }
       });
       return audio;
@@ -413,11 +445,25 @@
       }
     }
 
+    // 每首歌"因地址过期而重试"的次数。上限 1 次：
+    // 一次重取能解决绝大多数过期；再失败说明真的没音源，
+    // 继续重试只会让界面反复闪，不如直接跳下一首。
+    const urlRetryCount = new Map();
+
     const URL_CACHE_MAX = 12;
     const urlCache = LruCache.create(URL_CACHE_MAX);
     function urlKey(id, level) {
       return String(id) + "|" + String(level || "");
     }
+    // 直链有效期。网易云签名实际寿命约 20 分钟，这里取保守的 10 分钟：
+    // 宁可多取一次，也不要在"播完自动切下一首"时炸出 code 4。
+    const URL_TTL_MS = 10 * 60 * 1000;
+    function isUrlStale(hit) {
+      if (!hit || !hit.url) return true;
+      if (!hit.at) return true;      // 早期缓存条目没时间戳，一律当可疑
+      return (Date.now() - hit.at) > URL_TTL_MS;
+    }
+
     function forgetUrl(id) {
       // LruCache 没有 keys()，但档位只有 7 个 —— 按档位扫，不依赖内部实现。
       for (const lv of QUALITY_LEVELS) urlCache.delete(urlKey(id, lv));
@@ -472,9 +518,17 @@
     async function fetchUrl(id, level) {
       const key = urlKey(id, level);
       const hit = urlCache.get(key);
-      if (hit) return hit; // get 已把它刷成最新
+      // 时效校验：网易云直链带签名过期时间（地址里有 20261023112707 这类时间戳）。
+      // 缓存只按 songId 存，拿到过期地址就会 MEDIA_ERR_SRC_NOT_SUPPORTED（code 4）。
+      // 实测症状：一首播完自动切下一首时卡住 —— 因为下一首的地址是几十分钟前
+      // 预取缓存的，签名早过期了。
+      if (hit && !isUrlStale(hit)) return hit;
+      if (hit) urlCache.delete(key);   // 过期就丢掉，下面重取
       const got = await fetchUrlRaw(id, level);
-      if (got && got.url) urlCache.set(key, got);
+      if (got && got.url) {
+        got.at = Date.now();           // 记录取址时间，供上面判断
+        urlCache.set(key, got);
+      }
       return got;
     }
 
@@ -726,6 +780,8 @@
       store.song = song;
       // 新的一首：先把上一首的实际音质清掉，取到链后再填（见下面的 fetchUrl 调用）
       store.actualQuality = null;
+      // 新的一首：清掉重试计数（否则同一 id 复用时会误判"已重试过"）
+      try { if (song && song.id) urlRetryCount.delete(String(song.id)); } catch (err) {}
       store.lyrics = null;
       store.time = 0;
       store.duration = song.duration || 0;
