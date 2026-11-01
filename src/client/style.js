@@ -540,6 +540,7 @@
    用户的系统恰好开着这个偏好 → 打开播放器页什么都不动，"逐步渲染"消失。 */
 
 /* 窄屏：左右堆叠，封面缩成顶部一块 */
+/* 窄屏：左右堆叠，封面缩成顶部一块 */
 @media (max-width:760px){
   .nm-pl{grid-template-columns:1fr;grid-template-rows:auto 1fr}
   .nm-pl-art{min-height:150px;max-height:34vh;
@@ -550,4 +551,117 @@
   .nm-pl-ctl,.nm-pl-prog{max-width:none}
 }
 
+/* ═══ 设置页 v2（2026-11-01 重设计 · Linear/Vercel 风格）══════════════
+   设计语言：深色 + hairline 细线 + 方角开关（非 iOS 圆形）+ tabular-nums。
+   性能约束：只做 transform/opacity/bg 过渡；无 backdrop-filter；nav 用
+   IntersectionObserver 不绑 scroll。
+
+   布局：左 140px 分区导航 + 右内容区（独立滚动）。 */
+
+/* 根容器：双栏 grid */
+.nm-set2{display:grid;grid-template-columns:140px 1fr;gap:16px;align-items:start;min-height:100%}
+/* 左导航 */
+.nm-set2-nav{position:sticky;top:8px;display:flex;flex-direction:column;gap:2px}
+.nm-set2-nav-item{display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:6px;
+  border:none;background:transparent;color:rgba(255,255,255,.48);font-size:12.5px;
+  cursor:pointer;text-align:left;transition:color .15s ease,background-color .15s ease;position:relative}
+.nm-set2-nav-item::before{content:'';width:2px;height:14px;border-radius:1px;background:transparent;
+  transition:background-color .15s ease}
+.nm-set2-nav-item:hover{color:rgba(255,255,255,.75)}
+.nm-set2-nav-on{color:rgb(120,160,255);background:rgba(77,118,230,.12)}
+.nm-set2-nav-on::before{background:rgb(90,140,255)}
+/* 右内容区 */
+.nm-set2-body{display:flex;flex-direction:column;gap:20px;min-width:0}
+/* 分区卡片 */
+.nm-set2-sec{background:rgba(14,23,43,.72);border-radius:12px;
+  box-shadow:inset 0 0 0 1px rgba(185,204,246,.08);overflow:hidden;
+  scroll-margin-top:8px}
+.nm-set2-head{display:flex;align-items:center;gap:8px;padding:14px 16px 10px;
+  border-bottom:1px solid rgba(255,255,255,.04)}
+.nm-set2-head-dot{width:5px;height:5px;border-radius:2px;background:rgb(90,140,255);flex:none}
+.nm-set2-head-t{font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;
+  color:rgba(255,255,255,.42)}
+/* 行 */
+.nm-set2-row{display:flex;align-items:center;justify-content:space-between;gap:12px;
+  min-height:42px;padding:9px 16px;border-bottom:1px solid rgba(255,255,255,.03);
+  transition:background-color .12s ease}
+.nm-set2-row:last-child,.nm-set2-row:last-of-type{border-bottom:none}
+.nm-set2-row:hover{background:rgba(255,255,255,.02)}
+.nm-set2-lab{font-size:13px;color:rgba(255,255,255,.90);flex:1;min-width:0;
+  display:flex;align-items:center}
+.nm-set2-val{font-size:12px;color:rgba(255,255,255,.50);
+  font-variant-numeric:tabular-nums;white-space:nowrap;flex:none}
+.nm-set2-hint{padding:6px 16px 12px;font-size:11.5px;line-height:1.55;
+  color:rgba(255,255,255,.42)}
+.nm-set2-hint:last-child{padding-bottom:14px}
+/* 模块网格（2 列） */
+.nm-set2-grid{display:grid;grid-template-columns:1fr 1fr}
+.nm-set2-cell{display:flex;align-items:center;justify-content:space-between;gap:8px;
+  padding:9px 16px;border-bottom:1px solid rgba(255,255,255,.03);min-height:40px;
+  transition:background-color .12s ease}
+.nm-set2-cell:hover{background:rgba(255,255,255,.02)}
+.nm-set2-cell:nth-child(odd){border-right:1px solid rgba(255,255,255,.03)}
+.nm-set2-cell:nth-last-child(1):nth-child(odd),
+.nm-set2-cell:nth-last-child(2):nth-child(even){border-bottom:none}
+.nm-set2-cell:nth-last-child(1):nth-child(even){border-bottom:none}
+.nm-set2-cell-lab{font-size:12.5px;color:rgba(255,255,255,.85)}
+/* 方角开关（非 iOS） */
+.nm-set2-tg{position:relative;width:34px;height:18px;border-radius:3px;flex:none;
+  border:1px solid rgba(255,255,255,.10);background:rgba(255,255,255,.05);
+  cursor:pointer;transition:background-color .16s ease,border-color .16s ease;padding:0}
+.nm-set2-tg-thumb{position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:2px;
+  background:rgba(255,255,255,.35);transition:transform .16s cubic-bezier(.4,0,.2,1),background-color .16s ease}
+.nm-set2-tg-on{background:rgba(77,118,230,.85);border-color:transparent}
+.nm-set2-tg-on .nm-set2-tg-thumb{transform:translateX(16px);background:#fff}
+/* 滑块行 */
+.nm-set2-slider{display:flex;align-items:center;gap:12px;flex:1;max-width:200px}
+.nm-set2-range{-webkit-appearance:none;appearance:none;flex:1;height:2px;border-radius:1px;
+  background:linear-gradient(to right,rgb(90,140,255) 0%,rgb(90,140,255) var(--nm-fill,50%),rgba(255,255,255,.10) var(--nm-fill,50%));
+  outline:none;cursor:pointer;margin:0}
+.nm-set2-range::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:12px;height:12px;
+  border-radius:50%;background:#fff;border:none;box-shadow:0 1px 4px rgba(0,0,0,.3);
+  cursor:grab;transition:transform .12s ease}
+.nm-set2-range::-webkit-slider-thumb:hover{transform:scale(1.15)}
+.nm-set2-range::-webkit-slider-thumb:active{cursor:grabbing;transform:scale(1.25)}
+/* 下拉 */
+.nm-set2-select{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.10);
+  border-radius:6px;color:rgba(255,255,255,.90);font-size:12.5px;
+  padding:5px 26px 5px 10px;cursor:pointer;outline:none;appearance:none;-webkit-appearance:none;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5'%3E%3Cpath d='M0 0l4 5 4-5z' fill='rgba(255,255,255,.40)'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 8px center;
+  transition:border-color .15s ease,box-shadow .15s ease}
+.nm-set2-select:hover{border-color:rgba(255,255,255,.18)}
+.nm-set2-select:focus{border-color:rgba(77,118,230,.60);box-shadow:0 0 0 2px rgba(77,118,230,.12)}
+.nm-set2-select option{background:rgb(14,23,43);color:rgba(255,255,255,.90)}
+/* 数字输入 */
+.nm-set2-num{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.10);
+  border-radius:6px;color:rgba(255,255,255,.90);font-size:12.5px;
+  padding:5px 8px;width:72px;text-align:right;outline:none;
+  font-variant-numeric:tabular-nums;
+  transition:border-color .15s ease,box-shadow .15s ease}
+.nm-set2-num:hover{border-color:rgba(255,255,255,.18)}
+.nm-set2-num:focus{border-color:rgba(77,118,230,.60);box-shadow:0 0 0 2px rgba(77,118,230,.12)}
+/* 文本输入 */
+.nm-set2-text{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.10);
+  border-radius:6px;color:rgba(255,255,255,.90);font-size:12px;
+  padding:5px 8px;flex:1;min-width:0;outline:none;
+  transition:border-color .15s ease,box-shadow .15s ease}
+.nm-set2-text:focus{border-color:rgba(77,118,230,.60);box-shadow:0 0 0 2px rgba(77,118,230,.12)}
+.nm-set2-text::placeholder{color:rgba(255,255,255,.30)}
+/* 操作按钮行 */
+.nm-set2-actions{display:flex;gap:6px;flex-wrap:wrap;padding:10px 16px 14px}
+.nm-set2-btn{border:none;border-radius:6px;font-size:12px;padding:6px 12px;
+  cursor:pointer;transition:background-color .12s ease,color .12s ease}
+.nm-set2-btn-ghost{background:rgba(255,255,255,.05);color:rgba(255,255,255,.70)}
+.nm-set2-btn-ghost:hover{background:rgba(255,255,255,.09);color:rgba(255,255,255,.90)}
+.nm-set2-btn-accent{background:rgba(77,118,230,.75);color:#fff}
+.nm-set2-btn-accent:hover{background:rgba(77,118,230,.95)}
+.nm-set2-btn-danger{background:rgba(220,60,60,.12);color:rgb(255,120,120)}
+.nm-set2-btn-danger:hover{background:rgba(220,60,60,.22)}
+/* 窄屏：导航变横条 */
+@media (max-width:560px){
+  .nm-set2{grid-template-columns:1fr;gap:10px}
+  .nm-set2-nav{position:static;flex-direction:row;flex-wrap:wrap;gap:4px}
+  .nm-set2-nav-item::before{display:none}
+}
 `;
