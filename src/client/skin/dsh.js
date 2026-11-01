@@ -60,6 +60,31 @@ const DshSkin = (() => {
       '[class*="_banner_7gxqk"], [class*="_plain_7gxqk"]{background-color:transparent!important}',
       '[class*="_block_7gxqk"], [class*="code-block"]{background-color:rgba(18,20,26,.72)!important;border-color:rgba(255,255,255,.10)!important}',
       "pre,code{background-color:transparent!important}",
+      // ★ 阅读底（2026-10-29）：磨砂只负责模糊，**不提供稳定的文字底色**。
+      // 实测输入卡/文件卡/任务条的计算背景是 rgba(...,0)，背后是封面与大字歌词；
+      // blur 会把背景搅乱，但不能阻止"背景字叠到正文上"。所以给正文承载面
+      // 单独补一层深蓝半透明底，**保留原有 backdrop-filter**，而不是取消磨砂。
+      //
+      // 只按"卡片面"形态选，不写死 DSH 的类名 hash（升级后 RlGAzG_card 已变成 GRgSLq_card）。
+      // 排除插件自己的 .nm-*（播放器/设置/侧栏）与主题预览块 themeCube（它的颜色是内容）。
+      //
+      // ⚠️ 不能要求 .nm-frost：复核发现部分卡片当前并未获得磨砂类，
+      // 若把 .nm-frost 写进选择器，最该修的面板会恰好漏掉。
+      // 这里只补底色、不强行加 backdrop-filter，因此不会改变包含块/层叠关系。
+      '[class*="_card"]:not([class*="nm-"]):not([class*="themeCube"]):not([class*="header"]):not([class*="GRgSLq_card"]){background-color:rgba(14,23,43,.86)!important;box-shadow:inset 0 0 0 1px rgba(185,204,246,.10),0 12px 34px rgba(0,0,0,.10)!important}',
+      // 任务进度条没有 _card 后缀，但它也是正文承载面（SECTION.root）。
+      // 用 root 形态限定，仍不碰插件自己的界面。
+      'section[class*="_root"]:not([class*="nm-"]):not([class*="themeCube"]){background-color:rgba(14,23,43,.86)!important;box-shadow:inset 0 0 0 1px rgba(185,204,246,.10)!important}',
+      // 设置页与插件自己的设置分组：原来是 rgba(255,255,255,.06)，实测封面/歌词会透进正文。
+      // 用同色阶的深蓝底替代，保留圆角、描边与层间关系；不改尺寸/间距。
+      '.nm-settings-group{background-color:rgba(14,23,43,.84)!important;box-shadow:inset 0 0 0 1px rgba(185,204,246,.10)!important}',
+      // 弹出菜单/浮层：DSH 会按宿主主题给 .is-light 白底，而我们的文字令牌已提亮，
+      // 形成"白底浅字"。这类浮层必须跟着沉浸皮肤进入深蓝材质，不能跟着主题误判。
+      // 只处理菜单面，不动触发器、不动模型/品牌的蓝色强调色。
+      '[class*="dcs-model-menu"], [class*="dcs-menu"].is-light, [class*="dcs-menu"][class*="is-light"]{background-color:rgba(14,23,43,.96)!important;color:rgba(255,255,255,.92)!important;box-shadow:0 14px 40px rgba(0,0,0,.32),inset 0 0 0 1px rgba(185,204,246,.14)!important}',
+      '[class*="dcs-menu-item"], [class*="dcs-menu-item-name"]{color:rgba(255,255,255,.90)!important}',
+      '[class*="dcs-menu-group-title"]{color:rgba(255,255,255,.66)!important;opacity:1!important}',
+      '[class*="dcs-menu-item"]:hover, [class*="dcs-menu-item"][class*="active"], [class*="dcs-menu-item"][class*="selected"]{background-color:rgba(106,137,196,.22)!important}',
       '[class*="bubble"]{background-color:rgba(28,32,44,.58)!important}',
       '[class*="newSession"]{background-color:rgba(28,32,44,.58)!important;border-color:rgba(255,255,255,.14)!important}',
       // 「加载更早」：不是文件级重要项，按规则也该压暗（它自己没有类名，靠父层 xz4KEq_older 锚）
@@ -70,15 +95,16 @@ const DshSkin = (() => {
       // 描边用 box-shadow inset 而不是 border：这些元素原本 border-width 是 0，
       // 加真 border 会让它们各长 2px，整个弹窗布局会抖。
       '[class*="navCell"][class*="active"]{background-color:rgba(56,64,82,.72)!important;box-shadow:inset 0 0 0 1px rgba(255,255,255,.18)!important}',
-      '[class*="_selector"]{background-color:rgba(28,32,44,.58)!important;box-shadow:inset 0 0 0 1px rgba(255,255,255,.14)!important}',
-      '[class*="stepper"]{background-color:rgba(28,32,44,.5)!important;box-shadow:inset 0 0 0 1px rgba(255,255,255,.12)!important}',
+      // 小控件没有磨砂面，底色必须更实，才能在亮封面上保持文字/控件分离。
+      '[class*="_selector"]{background-color:rgba(14,23,43,.80)!important;box-shadow:inset 0 0 0 1px rgba(255,255,255,.14)!important}',
+      '[class*="stepper"]{background-color:rgba(14,23,43,.78)!important;box-shadow:inset 0 0 0 1px rgba(255,255,255,.12)!important}',
       // 注意：**不要**压暗 [class*="themeCube"]（主题预览块）。
       // 它的白色是内容（在预览"主题长什么样"），压暗了预览就失去意义 ——
       // 同 §3 的原则：判断标准是"是不是内容/重不重要"，不是"它白不白"。
       // 状态标签也要压暗（用户选 A：严格执行"白只给文件级"）。
       // 注意 _tag_ 用的是"类名前缀"匹配 —— 标签永远不是内容，放宽一点没风险。
-      '[class*="RotMhW_switcher"]{background-color:rgba(28,32,44,.58)!important;box-shadow:inset 0 0 0 1px rgba(255,255,255,.14)!important}',
-      '[class*="_tag_"]{background-color:rgba(28,32,44,.55)!important;box-shadow:inset 0 0 0 1px rgba(255,255,255,.12)!important}',
+      '[class*="RotMhW_switcher"]{background-color:rgba(14,23,43,.80)!important;box-shadow:inset 0 0 0 1px rgba(255,255,255,.14)!important}',
+      '[class*="_tag_"]{background-color:rgba(14,23,43,.78)!important;box-shadow:inset 0 0 0 1px rgba(255,255,255,.12)!important}',
       // ★ 唯一保留白的【非文件】元素：主题预览块 themeCube —— 它的白是内容（在预览主题），
       //   压暗了预览就没意义。判断标准始终是"是不是内容/重不重要"，不是"它白不白"。
     ].join("\n");
@@ -802,12 +828,28 @@ const DshSkin = (() => {
       // 磨砂：**只有值得磨的那些**参与（见 isFrostWorthyToken）。
       // 两个集合刻意分开 —— 页面底/侧栏要透明但不要磨砂。
       const frosty = new Set();
+
+      // ★ 深蓝玻璃基色（2026-11-01，DSH 更新切到浅色主题导致满屏白雾后加的）：
+      //
+      // 原来这里是 toRgba(pair[1], alpha) —— 对原始令牌色只加 alpha。
+      // 宿主是深色主题时原始色是深色，透出来是深色玻璃，好看；
+      // 但 DSH 更新后 color-scheme=light，原始色全变白系
+      // （bg-base=rgb(255,255,255)、sidebar=rgb(249,250,251)…），
+      // 透出来就是 rgba(255,255,255,.45) 的白雾 —— 叠上提亮后的浅色文字，
+      // 整个界面白底浅字，"视觉效果完全崩坏"（用户原话）。
+      //
+      // 修法：不再跟着主题的原始色走，7 个背景令牌统一输出深蓝玻璃。
+      // 这本来就是这套皮肤的设计意图（"深蓝色为底的玻璃"），
+      // 而且对主题切换免疫 —— 深浅主题下输出一致。
+      // 原始色之间的差异（255/249/248）在 45% alpha 下肉眼不可见，统一无损失。
+      const GLASS_BG = "14,23,43";   // 与 DARK_SURFACE_CSS 的阅读底同色阶
+      const toGlassRgba = function (a) {
+        return "rgba(" + GLASS_BG + "," + Math.min(1, Math.max(0, a)) + ")";
+      };
+
       for (const pair of raws) {
         if (!pair[1]) continue;
-        // 一视同仁：所有面用同一个 alpha。
-        // （曾经试过"承载文字的层更实一点"，结果面板变成灰白 milky、反而更难看，
-        //   文字也并没救回来 —— 用户明确说框和磨砂都没问题，要改的是文字颜色。）
-        const rgba = toRgba(pair[1], alpha);
+        const rgba = toGlassRgba(alpha);
         if (rgba) {
           decls.push(pair[0] + ":" + rgba + "!important");
           const k = rgbaKey(rgba);
@@ -821,7 +863,8 @@ const DshSkin = (() => {
       if (!decls.length) {
         for (const name of discoverBgTokens(24)) {
           if (OVERLAY_NAME_RE.test(name)) continue;
-          const rgba = toRgba(readTokenOriginal(name), alpha);
+          // 兜底路径同样输出深蓝玻璃（理由见上面 toGlassRgba 的注释）
+          const rgba = toGlassRgba(alpha);
           if (rgba) {
             decls.push(name + ":" + rgba + "!important");
             const k = rgbaKey(rgba);

@@ -1,4 +1,4 @@
-﻿    // Hot-reload guard: when this bundle is re-executed while a previous
+    // Hot-reload guard: when this bundle is re-executed while a previous
     // instance of the plugin is still playing (an orphaned <audio> element),
     // stop it immediately so the old and new players never overlap.
     if (typeof window !== "undefined" && window.__nmAudio && !window.__nmAudio.paused) {
@@ -3336,15 +3336,22 @@
 
 /* 本插件组件消费的是 --color-* 这套令牌（不是 DSH 的 --dsw-*）。
    它们原本不存在 → 组件全部落到硬编码的深色兜底值上，所以界面又黑又不透。
-   在这里就地定义成玻璃值，整个音乐 UI 一次变透。 */
+   在这里就地定义成玻璃值，整个音乐 UI 一次变透。
+
+   2026-10-29 可读性修正（实测依据）：
+   - fg3 .48 → .62：fg3 是页签/歌手名/时间/说明文字的统一样式，
+     挂了十几处类。48% 白在深蓝底 + 封面透出时读不清（用户实测反馈
+     "设置页还有不少显示问题，主要是字体颜色"）。62% 是辅助文字
+     在 .84 深蓝底上的可读下限，同时与 fg1(.95) 保留明显层级。
+   - fg2 .72 → .78：分组标题微调，保持 fg1 > fg2 > fg3 的梯子不塌。 */
 .nm-panel,.nm-page-root,.nm-pl{
   --color-bg1:rgba(13,17,23,.45);
   --color-bg2:rgba(255,255,255,.06);
   --color-bg3:rgba(255,255,255,.11);
   --color-border:rgba(255,255,255,.12);
   --color-fg1:rgba(255,255,255,.95);
-  --color-fg2:rgba(255,255,255,.72);
-  --color-fg3:rgba(255,255,255,.48);
+  --color-fg2:rgba(255,255,255,.78);
+  --color-fg3:rgba(255,255,255,.62);
 }
 
 /* ── 背景层 ─────────────────────────────────────────────────────── */
