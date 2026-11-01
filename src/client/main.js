@@ -3366,9 +3366,9 @@
    缩放放在同一个动画里，避免两层 scale 不同步导致的"画面拉一下"。 */
 @keyframes nmAmbFadeIn{from{opacity:0;transform:scale(1.26)}to{opacity:1;transform:scale(1.22)}}
 @keyframes nmAmbFadeOut{from{opacity:1;transform:scale(1.22)}to{opacity:0;transform:scale(1.19)}}
-@media (prefers-reduced-motion: reduce){
-  .nm-amb-cover{animation:none !important}
-}
+/* 2026-11-01 撤掉 @media(prefers-reduced-motion:reduce){.nm-amb-cover{animation:none!important}}：
+   用户系统开着"减少动态效果"，这条把切歌交叉淡化整个杀了。
+   本插件的动画是核心体验的一部分，不再跟系统这个偏好走。 */
 .nm-amb-covers{position:absolute;inset:0;overflow:hidden}
 .nm-amb-cover{position:absolute;inset:-14%;background-size:cover;background-position:center center;transform:scale(1.22);will-change:transform}
 .nm-amb-dim{position:absolute;inset:0}
@@ -3439,7 +3439,7 @@
    尊重系统的"减少动态效果"。 */
 @keyframes nm-rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 .nm-rise{animation:nm-rise .34s cubic-bezier(.22,.61,.36,1) both;animation-delay:calc(var(--nm-i,0) * 26ms)}
-@media (prefers-reduced-motion:reduce){.nm-rise{animation:none}}
+/* 同上：撤掉 reduced-motion 的杀手规则，歌单逐行入场不受系统偏好影响 */
 
 /* ── 播放页样式 · 青春彩胶 ─────────────────────────────────────────
    官方【青春彩胶】："造型简单的透明底座和指针，让视觉焦点更聚焦在颜色变化上；
@@ -3682,12 +3682,10 @@
 @keyframes nmPlUp{to{opacity:1;transform:translateY(0)}}
 @keyframes nmPlStroke{to{stroke-dashoffset:0}}
 
-/* 尊重系统的"减少动态效果"设置 */
-@media (prefers-reduced-motion: reduce){
-  .nm-pl *{animation:none !important;transition:none !important;
-    clip-path:none !important;transform:none !important;opacity:1 !important;
-    stroke-dashoffset:0 !important}
-}
+/* 2026-11-01 撤掉整个 @media(prefers-reduced-motion:reduce) 块：
+   原来是"尊重系统减少动态"，但它把播放器页的全部入场动画
+   （nmPlWipe/nmPlRise/nmPlUp/nmPlDraw/nmPlStroke）一刀切关掉了。
+   用户的系统恰好开着这个偏好 → 打开播放器页什么都不动，"逐步渲染"消失。 */
 
 /* 窄屏：左右堆叠，封面缩成顶部一块 */
 @media (max-width:760px){
